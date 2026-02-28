@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual env
+.venv/
+venv/
+
+# Local artifacts
+.DS_Store
+outputs/
+
+# IDE
+.vscode/
+.idea/
