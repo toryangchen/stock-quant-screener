@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 import pandas as pd
@@ -8,6 +9,14 @@ import pandas as pd
 from src.config import AppConfig
 from src.data_source.base import DataSource
 from src.logic.risk import calc_position_size
+
+
+def _format_scan_code(code: str) -> str:
+    text = str(code).strip().lower()
+    if text.startswith(("sh", "sz", "bj")):
+        return text
+    m = re.search(r"(\d{6})$", text)
+    return m.group(1) if m else text
 
 
 def run_trend_breakout(
@@ -20,7 +29,7 @@ def run_trend_breakout(
     candidates: list[dict] = []
 
     for _, row in stock_pool_df.iterrows():
-        code = str(row["code"]).zfill(6)
+        code = _format_scan_code(str(row["code"]))
         name = str(row["name"])
 
         try:
