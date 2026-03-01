@@ -10,6 +10,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+如果你有 Tushare Pro token（推荐），可放到本地 `.env`（已被 gitignore）：
+
+```bash
+cp .env.example .env
+# 编辑 .env 填入真实 token
+```
+
+程序启动时会自动读取 `.env`，并优先使用 Tushare 的 A 股日线；ETF 数据仍由 AkShare 兜底。
+
 ## 运行
 
 ```bash

@@ -2,12 +2,28 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from importlib import import_module
 from pathlib import Path
 
 from src.config import AppConfig, load_config
 from src.output.logger import setup_logger
+
+
+def load_env_file(env_path: Path = Path(".env")) -> None:
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,6 +144,7 @@ def run_all(ds, cfg: AppConfig, logger: logging.Logger) -> None:
 
 
 def main() -> int:
+    load_env_file(Path(".env"))
     logger = setup_logger()
     args = parse_args()
 
@@ -139,7 +156,18 @@ def main() -> int:
         return 1
 
     try:
-        ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
+        ts_token = os.getenv("TUSHARE_TOKEN", "").strip()
+        if ts_token:
+            try:
+                ds = import_module("src.data_source.tushare_impl").TushareDataSource(token=ts_token)
+                logger.info("DataSource 使用 Tushare(日线) + AkShare(ETF备用)")
+            except Exception as exc:
+                logger.warning("Tushare 初始化失败，回退 AkShare: %s", exc)
+                ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
+                logger.info("DataSource 使用 AkShare")
+        else:
+            ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
+            logger.info("未检测到 TUSHARE_TOKEN，DataSource 使用 AkShare")
     except Exception as exc:
         logger.error("DataSource 初始化失败: %s", exc)
         return 2

@@ -10,6 +10,8 @@ venv/
 # Local artifacts
 .DS_Store
 outputs/
+.env
+.env.local
 
 # IDE
 .vscode/
