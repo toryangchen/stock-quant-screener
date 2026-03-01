@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
+import time
+from collections import deque
 from datetime import datetime
 
 import pandas as pd
@@ -22,6 +25,9 @@ class TushareDataSource(DataSource):
 
         ts.set_token(self.token)
         self.pro = ts.pro_api(self.token)
+        self.logger = logging.getLogger("quant_screener")
+        self.rate_limit_per_minute = int(os.getenv("TUSHARE_RATE_LIMIT_PER_MINUTE", "50"))
+        self._request_timestamps: deque[float] = deque()
 
         self.akshare_backup = None
         try:
@@ -30,6 +36,25 @@ class TushareDataSource(DataSource):
             self.akshare_backup = AkShareDataSource()
         except Exception:
             self.akshare_backup = None
+
+    def _acquire_request_slot(self) -> None:
+        while True:
+            now = time.monotonic()
+            while self._request_timestamps and now - self._request_timestamps[0] >= 60.0:
+                self._request_timestamps.popleft()
+
+            if len(self._request_timestamps) < self.rate_limit_per_minute:
+                self._request_timestamps.append(now)
+                return
+
+            wait_sec = 60.0 - (now - self._request_timestamps[0]) + 0.01
+            if wait_sec > 0:
+                self.logger.info(
+                    "Tushare 达到每分钟 %s 次上限，等待 %.1f 秒后继续",
+                    self.rate_limit_per_minute,
+                    wait_sec,
+                )
+                time.sleep(wait_sec)
 
     def _normalize_code(self, code: str) -> str:
         text = str(code).strip().lower()
@@ -60,18 +85,26 @@ class TushareDataSource(DataSource):
         return f"{digits}.SZ"
 
     def get_a_spot(self) -> pd.DataFrame:
-        df = self.pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
-        if df is None or df.empty:
-            raise RuntimeError("Tushare stock_basic 返回空数据")
+        try:
+            self._acquire_request_slot()
+            df = self.pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
+            if df is None or df.empty:
+                raise RuntimeError("Tushare stock_basic 返回空数据")
 
-        out = df.rename(columns={"ts_code": "code", "name": "name"}).copy()
-        out["code"] = out["code"].astype(str).str.split(".").str[0].map(self._normalize_code)
-        out["name"] = out["name"].astype(str)
-        return out[["code", "name"]]
+            out = df.rename(columns={"ts_code": "code", "name": "name"}).copy()
+            out["code"] = out["code"].astype(str).str.split(".").str[0].map(self._normalize_code)
+            out["name"] = out["name"].astype(str)
+            return out[["code", "name"]]
+        except Exception as exc:
+            if self.akshare_backup is None:
+                raise
+            self.logger.warning("Tushare stock_basic 不可用，回退 AkShare 股票池: %s", exc)
+            return self.akshare_backup.get_a_spot()
 
     def get_stock_daily(self, code: str) -> pd.DataFrame:
         ts_code = self._to_ts_code(code)
         end_date = datetime.now().strftime("%Y%m%d")
+        self._acquire_request_slot()
         df = self.pro.daily(ts_code=ts_code, start_date="19900101", end_date=end_date)
 
         if df is None or df.empty:
