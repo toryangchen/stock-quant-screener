@@ -11,6 +11,48 @@ from src.config import AppConfig, load_config
 from src.output.logger import setup_logger
 
 
+def apply_secondary_breakout_filter(candidates, logger: logging.Logger):
+    import pandas as pd
+
+    if len(candidates) <= 100:
+        return candidates
+
+    df2 = candidates.copy()
+    original_count = len(df2)
+
+    df2["vol_ratio"] = pd.to_numeric(df2.get("vol_ratio"), errors="coerce")
+    df2["entry_price"] = pd.to_numeric(df2.get("entry_price"), errors="coerce")
+    df2["stop_price"] = pd.to_numeric(df2.get("stop_price"), errors="coerce")
+    df2["close"] = pd.to_numeric(df2.get("close"), errors="coerce")
+
+    # 1) 量能过滤
+    df2 = df2[(df2["vol_ratio"] >= 2.0) & (df2["vol_ratio"] <= 6.0)]
+
+    # 2) 止损空间过滤
+    df2["risk_pct"] = (df2["entry_price"] - df2["stop_price"]) / df2["entry_price"]
+    df2 = df2[(df2["risk_pct"] >= 0.04) & (df2["risk_pct"] <= 0.08)]
+
+    # 3) 涨幅过滤（如果有）
+    if "pct_chg" in df2.columns:
+        df2["pct_chg"] = pd.to_numeric(df2["pct_chg"], errors="coerce")
+        df2 = df2[df2["pct_chg"] >= 0.04]
+
+    # 4) 市值过滤（如果有）
+    if "mkt_cap" in df2.columns:
+        df2["mkt_cap"] = pd.to_numeric(df2["mkt_cap"], errors="coerce")
+        mkt_cap_valid = df2["mkt_cap"].notna()
+        if mkt_cap_valid.any():
+            df2 = df2[(~mkt_cap_valid) | ((df2["mkt_cap"] >= 100e8) & (df2["mkt_cap"] <= 600e8))]
+
+    # 5) 价格过滤
+    df2 = df2[df2["close"] <= 60]
+
+    # 最终排序
+    df2 = df2.sort_values(["vol_ratio", "risk_pct"], ascending=[True, True]).reset_index(drop=True)
+    logger.info("二次筛选已执行: 初筛 %s 只 -> 二筛 %s 只", original_count, len(df2))
+    return df2
+
+
 def load_env_file(env_path: Path = Path(".env")) -> None:
     if not env_path.exists():
         return
@@ -76,6 +118,7 @@ def run_breakout_module(
         candidates = run_trend_breakout(
             ds=ds, stock_pool_df=pool, cfg=cfg, logger=logger, pause_note=pause_note
         )
+        candidates = apply_secondary_breakout_filter(candidates, logger)
     except Exception as exc:
         logger.warning("趋势突破股票池拉取失败，降级为空结果: %s", exc)
         import pandas as pd
@@ -87,6 +130,9 @@ def run_breakout_module(
                 "close",
                 "is_60d_high",
                 "vol_ratio",
+                "pct_chg",
+                "mkt_cap",
+                "risk_pct",
                 "entry_price",
                 "stop_price",
                 "suggested_shares",

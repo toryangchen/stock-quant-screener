@@ -38,15 +38,19 @@ def run_trend_breakout(
 ) -> pd.DataFrame:
     candidates: list[dict] = []
     bulk_daily_map: dict[str, pd.DataFrame] = {}
+    use_bulk_mode = False
+    skipped_missing_in_bulk = 0
 
     if hasattr(ds, "get_stock_daily_bulk"):
         try:
             code_list = [_format_scan_code(str(c)) for c in stock_pool_df["code"].tolist()]
             bulk_daily_map = ds.get_stock_daily_bulk(code_list, min_days=cfg.min_history_days)
+            use_bulk_mode = True
             logger.info("批量日线拉取完成: 请求 %s 只, 命中 %s 只", len(code_list), len(bulk_daily_map))
         except Exception as exc:
             logger.warning("批量日线拉取失败，回退逐只拉取: %s", exc)
             bulk_daily_map = {}
+            use_bulk_mode = False
 
     for _, row in stock_pool_df.iterrows():
         code = _format_scan_code(str(row["code"]))
@@ -59,12 +63,17 @@ def run_trend_breakout(
                     df = bulk_daily_map[key]
                     break
             if df is None:
+                if use_bulk_mode:
+                    skipped_missing_in_bulk += 1
+                    continue
                 df = ds.get_stock_daily(code)
             if len(df) < cfg.min_history_days:
                 continue
 
             recent = df.tail(cfg.min_history_days).reset_index(drop=True)
             today_close = float(recent["close"].iloc[-1])
+            prev_close = float(recent["close"].iloc[-2]) if len(recent) >= 2 else float("nan")
+            pct_chg = (today_close - prev_close) / prev_close if prev_close > 0 else float("nan")
 
             high_window = recent["close"].iloc[-cfg.lookback_high - 1 : -1]
             prev_high = high_window.max()
@@ -88,6 +97,9 @@ def run_trend_breakout(
             if pause_note:
                 note = pause_note
 
+            mkt_cap = row.get("mktcap") if hasattr(row, "get") else None
+            mkt_cap_value = pd.to_numeric(mkt_cap, errors="coerce")
+
             candidates.append(
                 {
                     "code": code,
@@ -95,6 +107,8 @@ def run_trend_breakout(
                     "close": round(today_close, 3),
                     "is_60d_high": is_60d_high,
                     "vol_ratio": round(vol_ratio, 2) if pd.notna(vol_ratio) else None,
+                    "pct_chg": round(float(pct_chg), 4) if pd.notna(pct_chg) else None,
+                    "mkt_cap": float(mkt_cap_value) if pd.notna(mkt_cap_value) else None,
                     "entry_price": round(entry_price, 3),
                     "stop_price": round(stop_price, 3),
                     "suggested_shares": sizing.suggested_shares,
@@ -108,6 +122,9 @@ def run_trend_breakout(
         if cfg.sleep_seconds > 0:
             time.sleep(cfg.sleep_seconds)
 
+    if use_bulk_mode and skipped_missing_in_bulk > 0:
+        logger.info("批量模式跳过未命中股票: %s 只", skipped_missing_in_bulk)
+
     if not candidates:
         return pd.DataFrame(
             columns=[
@@ -116,6 +133,8 @@ def run_trend_breakout(
                 "close",
                 "is_60d_high",
                 "vol_ratio",
+                "pct_chg",
+                "mkt_cap",
                 "entry_price",
                 "stop_price",
                 "suggested_shares",

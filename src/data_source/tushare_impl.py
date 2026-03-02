@@ -5,7 +5,7 @@ import os
 import re
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -100,6 +100,8 @@ class TushareDataSource(DataSource):
         cache_key = f"tushare:daily_trade_date:{trade_date}"
         cached = self.cache.get_df(cache_key)
         if cached is not None and not cached.empty:
+            if "trade_date" not in cached.columns:
+                cached["trade_date"] = trade_date
             return cached
 
         self._acquire_request_slot()
@@ -113,8 +115,53 @@ class TushareDataSource(DataSource):
                     f"缺少字段 '{col}'，接口字段可能变动，需更新映射。当前列: {list(df.columns)}"
                 )
         out = df[need_cols].copy()
-        self.cache.set_df(cache_key, out)
+        compact_out = out.drop(columns=["trade_date"])
+        self.cache.set_df(cache_key, compact_out)
         return out
+
+    def _get_recent_trade_dates(self, min_days: int) -> list[str]:
+        # 优先从缓存键恢复交易日，避免受 trade_cal 权限影响
+        cache_keys = [
+            d["_id"]
+            for d in self.cache._coll.find(  # type: ignore[union-attr]
+                {"_id": {"$regex": r"^tushare:daily_trade_date:\d{8}$"}}, {"_id": 1}
+            )
+        ] if self.cache.enabled and self.cache._coll is not None else []
+        if cache_keys:
+            dates = sorted([k.rsplit(":", 1)[-1] for k in cache_keys])
+            if len(dates) >= min_days:
+                return dates[-min_days:]
+
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=400)
+        start_date = start_dt.strftime("%Y%m%d")
+        end_date = end_dt.strftime("%Y%m%d")
+
+        cache_key = f"tushare:trade_cal:SSE:{start_date}:{end_date}"
+        cached = self.cache.get_df(cache_key)
+        if cached is not None and not cached.empty and "trade_date" in cached.columns:
+            dates = (
+                cached["trade_date"]
+                .astype(str)
+                .dropna()
+                .drop_duplicates()
+                .sort_values()
+                .tolist()
+            )
+            return dates[-min_days:]
+
+        self._acquire_request_slot()
+        cal = self.pro.trade_cal(exchange="SSE", start_date=start_date, end_date=end_date, is_open="1")
+        if cal is None or cal.empty or "cal_date" not in cal.columns:
+            return []
+
+        out = cal[["cal_date"]].rename(columns={"cal_date": "trade_date"}).copy()
+        out["trade_date"] = out["trade_date"].astype(str)
+        out = out.sort_values("trade_date").reset_index(drop=True)
+        self.cache.set_df(cache_key, out)
+
+        dates = out["trade_date"].tolist()
+        return dates[-min_days:]
 
     def get_stock_daily_bulk(self, codes: list[str], min_days: int = 60) -> dict[str, pd.DataFrame]:
         if not codes:
@@ -140,30 +187,38 @@ class TushareDataSource(DataSource):
 
         ts_need = {code_to_ts[c] for c in missing_codes}
         collected: dict[str, list[dict]] = {c: [] for c in missing_codes}
-        trade_dates: list[str] = []
 
-        cursor = datetime.now()
-        looked_back_days = 0
-        # 为获取 60 个交易日，通常回看 90~120 个自然日足够，这里上限 240 天
-        while len(trade_dates) < min_days and looked_back_days < 240:
-            date_str = cursor.strftime("%Y%m%d")
-            day_df = self._get_daily_by_trade_date(date_str)
-            if not day_df.empty:
-                trade_dates.append(date_str)
-                day_df = day_df[day_df["ts_code"].isin(ts_need)]
+        trade_dates = self._get_recent_trade_dates(min_days)
+        if not trade_dates:
+            self.logger.warning("trade_cal 获取失败，回退自然日遍历模式")
+            cursor = datetime.now()
+            looked_back_days = 0
+            trade_dates = []
+            while len(trade_dates) < min_days and looked_back_days < 240:
+                date_str = cursor.strftime("%Y%m%d")
+                day_df = self._get_daily_by_trade_date(date_str)
                 if not day_df.empty:
-                    for _, r in day_df.iterrows():
-                        norm_code = self._normalize_code(str(r["ts_code"]).split(".")[0])
-                        if norm_code in collected:
-                            collected[norm_code].append(
-                                {
-                                    "date": r["trade_date"],
-                                    "close": r["close"],
-                                    "volume": r["vol"],
-                                }
-                            )
-            cursor = cursor - pd.Timedelta(days=1)
-            looked_back_days += 1
+                    trade_dates.append(date_str)
+                cursor = cursor - timedelta(days=1)
+                looked_back_days += 1
+
+        for date_str in trade_dates:
+            day_df = self._get_daily_by_trade_date(date_str)
+            if day_df.empty:
+                continue
+            day_df = day_df[day_df["ts_code"].isin(ts_need)]
+            if day_df.empty:
+                continue
+            for _, r in day_df.iterrows():
+                norm_code = self._normalize_code(str(r["ts_code"]).split(".")[0])
+                if norm_code in collected:
+                    collected[norm_code].append(
+                        {
+                            "date": r["trade_date"],
+                            "close": r["close"],
+                            "volume": r["vol"],
+                        }
+                    )
 
         for code in missing_codes:
             rows = collected.get(code, [])
@@ -177,12 +232,6 @@ class TushareDataSource(DataSource):
                     result[code] = df
                     self.cache.set_df(f"tushare:stock_daily:{code_to_ts[code]}", df, tail_rows=60)
                     continue
-
-            # 批量模式未覆盖时，再回退单票拉取
-            try:
-                result[code] = self.get_stock_daily(code)
-            except Exception:
-                continue
 
         return result
 
