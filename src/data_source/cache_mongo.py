@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -41,7 +41,7 @@ class MongoDataCache:
         if not self._is_ready():
             return None
 
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         doc = self._coll.find_one({"_id": key})
         if not doc:
             return None
@@ -63,7 +63,7 @@ class MongoDataCache:
         if not self._is_ready() or df.empty:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         expires_at = now + timedelta(seconds=self.ttl_seconds)
 
         out = df.copy()
