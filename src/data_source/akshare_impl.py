@@ -7,6 +7,7 @@ from datetime import datetime
 import pandas as pd
 
 from .base import DataSource
+from .cache_mongo import MongoDataCache
 
 
 class AkShareDataSource(DataSource):
@@ -16,6 +17,7 @@ class AkShareDataSource(DataSource):
         except ImportError as exc:
             raise RuntimeError("akshare 未安装，请先执行: pip install -r requirements.txt") from exc
         self.ak = ak
+        self.cache = MongoDataCache()
 
     def _pick_col(self, df: pd.DataFrame, candidates: Iterable[str], target: str) -> str:
         for col in candidates:
@@ -90,6 +92,11 @@ class AkShareDataSource(DataSource):
         raise RuntimeError(f"所有备用接口均失败: {preview}")
 
     def get_a_spot(self) -> pd.DataFrame:
+        cache_key = "akshare:a_spot"
+        cached = self.cache.get_df(cache_key)
+        if cached is not None and not cached.empty:
+            return cached
+
         df = self._run_with_fallback(
             [
                 ("stock_zh_a_spot_em", lambda: self.ak.stock_zh_a_spot_em()),
@@ -120,10 +127,15 @@ class AkShareDataSource(DataSource):
         if "mktcap" in out.columns:
             out["mktcap"] = pd.to_numeric(out["mktcap"], errors="coerce")
 
+        self.cache.set_df(cache_key, out)
         return out
 
     def get_stock_daily(self, code: str) -> pd.DataFrame:
         market_symbol = self._to_market_symbol(code)
+        cache_key = f"akshare:stock_daily:{market_symbol}"
+        cached = self.cache.get_df(cache_key)
+        if cached is not None and not cached.empty:
+            return cached
 
         def hist_raw() -> pd.DataFrame:
             return self.ak.stock_zh_a_hist(
@@ -151,10 +163,16 @@ class AkShareDataSource(DataSource):
                 ("stock_zh_a_hist_tx", lambda: self.ak.stock_zh_a_hist_tx(symbol=market_symbol, adjust="qfq")),
             ]
         )
-        return self._normalize_daily(df, volume_optional=False)
+        out = self._normalize_daily(df, volume_optional=False)
+        self.cache.set_df(cache_key, out)
+        return out
 
     def get_etf_daily(self, code: str) -> pd.DataFrame:
         market_symbol = self._to_market_symbol(code)
+        cache_key = f"akshare:etf_daily:{market_symbol}"
+        cached = self.cache.get_df(cache_key)
+        if cached is not None and not cached.empty:
+            return cached
 
         def em_raw() -> pd.DataFrame:
             return self.ak.fund_etf_hist_em(
@@ -181,4 +199,6 @@ class AkShareDataSource(DataSource):
                 ("fund_etf_hist_sina", lambda: self.ak.fund_etf_hist_sina(symbol=market_symbol)),
             ]
         )
-        return self._normalize_daily(df, volume_optional=True)
+        out = self._normalize_daily(df, volume_optional=True)
+        self.cache.set_df(cache_key, out)
+        return out

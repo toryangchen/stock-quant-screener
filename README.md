@@ -19,6 +19,7 @@ cp .env.example .env
 
 程序启动时会自动读取 `.env`，并优先使用 Tushare 的 A 股日线；ETF 数据仍由 AkShare 兜底。
 程序内置 Tushare 限流（默认每分钟 50 次），可通过 `TUSHARE_RATE_LIMIT_PER_MINUTE` 调整。
+程序支持 MongoDB 本地缓存（默认开启）：请求前先查缓存，命中则不再请求远端接口。
 
 ## 运行
 

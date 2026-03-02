@@ -10,6 +10,7 @@ from datetime import datetime
 import pandas as pd
 
 from .base import DataSource
+from .cache_mongo import MongoDataCache
 
 
 class TushareDataSource(DataSource):
@@ -28,6 +29,7 @@ class TushareDataSource(DataSource):
         self.logger = logging.getLogger("quant_screener")
         self.rate_limit_per_minute = int(os.getenv("TUSHARE_RATE_LIMIT_PER_MINUTE", "50"))
         self._request_timestamps: deque[float] = deque()
+        self.cache = MongoDataCache()
 
         self.akshare_backup = None
         try:
@@ -85,6 +87,11 @@ class TushareDataSource(DataSource):
         return f"{digits}.SZ"
 
     def get_a_spot(self) -> pd.DataFrame:
+        cache_key = "tushare:a_spot"
+        cached = self.cache.get_df(cache_key)
+        if cached is not None and not cached.empty:
+            return cached
+
         try:
             self._acquire_request_slot()
             df = self.pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
@@ -94,15 +101,24 @@ class TushareDataSource(DataSource):
             out = df.rename(columns={"ts_code": "code", "name": "name"}).copy()
             out["code"] = out["code"].astype(str).str.split(".").str[0].map(self._normalize_code)
             out["name"] = out["name"].astype(str)
-            return out[["code", "name"]]
+            out = out[["code", "name"]]
+            self.cache.set_df(cache_key, out)
+            return out
         except Exception as exc:
             if self.akshare_backup is None:
                 raise
             self.logger.warning("Tushare stock_basic 不可用，回退 AkShare 股票池: %s", exc)
-            return self.akshare_backup.get_a_spot()
+            out = self.akshare_backup.get_a_spot()
+            self.cache.set_df("akshare:a_spot", out)
+            return out
 
     def get_stock_daily(self, code: str) -> pd.DataFrame:
         ts_code = self._to_ts_code(code)
+        cache_key = f"tushare:stock_daily:{ts_code}"
+        cached = self.cache.get_df(cache_key)
+        if cached is not None and not cached.empty:
+            return cached
+
         end_date = datetime.now().strftime("%Y%m%d")
         self._acquire_request_slot()
         df = self.pro.daily(ts_code=ts_code, start_date="19900101", end_date=end_date)
@@ -123,9 +139,18 @@ class TushareDataSource(DataSource):
         out["close"] = pd.to_numeric(out["close"], errors="coerce")
         out["volume"] = pd.to_numeric(out["volume"], errors="coerce")
         out = out.dropna(subset=["date", "close", "volume"]).sort_values("date").reset_index(drop=True)
+        self.cache.set_df(cache_key, out)
         return out
 
     def get_etf_daily(self, code: str) -> pd.DataFrame:
+        market_code = self._to_ts_code(code).split(".")[0]
+        cache_key = f"akshare:etf_daily:{market_code}"
+        cached = self.cache.get_df(cache_key)
+        if cached is not None and not cached.empty:
+            return cached
+
         if self.akshare_backup is None:
             raise RuntimeError("当前 Token 无 fund_daily 权限，且 AkShare 备用源不可用")
-        return self.akshare_backup.get_etf_daily(code)
+        out = self.akshare_backup.get_etf_daily(code)
+        self.cache.set_df(cache_key, out)
+        return out
