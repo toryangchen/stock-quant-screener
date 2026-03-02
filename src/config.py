@@ -27,14 +27,14 @@ class AppConfig:
     lookback_high: int = 60
     vol_avg_window: int = 20
     vol_multiplier: float = 1.5
-    min_history_days: int = 200
+    min_history_days: int = 60
     exclude_st: bool = True
 
     mkt_cap_filter_enabled: bool = False
     mkt_cap_min: float = 100e8
     mkt_cap_max: float = 800e8
 
-    scan_limit: int = 500
+    scan_limit: int = 0
     sleep_seconds: float = 0.15
 
     account_capital: float = 20000

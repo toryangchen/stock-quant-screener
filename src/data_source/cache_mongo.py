@@ -59,7 +59,7 @@ class MongoDataCache:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df
 
-    def set_df(self, key: str, df: pd.DataFrame) -> None:
+    def set_df(self, key: str, df: pd.DataFrame, tail_rows: int | None = None) -> None:
         if not self._is_ready() or df.empty:
             return
 
@@ -67,6 +67,8 @@ class MongoDataCache:
         expires_at = now + timedelta(seconds=self.ttl_seconds)
 
         out = df.copy()
+        if tail_rows is not None and tail_rows > 0:
+            out = out.tail(tail_rows).reset_index(drop=True)
         for col in out.columns:
             if str(out[col].dtype).startswith("datetime"):
                 out[col] = out[col].dt.strftime("%Y-%m-%d")

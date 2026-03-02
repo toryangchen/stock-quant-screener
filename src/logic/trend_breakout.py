@@ -19,6 +19,16 @@ def _format_scan_code(code: str) -> str:
     return m.group(1) if m else text
 
 
+def _code_variants(code: str) -> list[str]:
+    variants = [code]
+    m = re.search(r"(\d{6})$", code)
+    if m:
+        d = m.group(1)
+        if d not in variants:
+            variants.append(d)
+    return variants
+
+
 def run_trend_breakout(
     ds: DataSource,
     stock_pool_df: pd.DataFrame,
@@ -27,13 +37,29 @@ def run_trend_breakout(
     pause_note: str = "",
 ) -> pd.DataFrame:
     candidates: list[dict] = []
+    bulk_daily_map: dict[str, pd.DataFrame] = {}
+
+    if hasattr(ds, "get_stock_daily_bulk"):
+        try:
+            code_list = [_format_scan_code(str(c)) for c in stock_pool_df["code"].tolist()]
+            bulk_daily_map = ds.get_stock_daily_bulk(code_list, min_days=cfg.min_history_days)
+            logger.info("批量日线拉取完成: 请求 %s 只, 命中 %s 只", len(code_list), len(bulk_daily_map))
+        except Exception as exc:
+            logger.warning("批量日线拉取失败，回退逐只拉取: %s", exc)
+            bulk_daily_map = {}
 
     for _, row in stock_pool_df.iterrows():
         code = _format_scan_code(str(row["code"]))
         name = str(row["name"])
 
         try:
-            df = ds.get_stock_daily(code)
+            df = None
+            for key in _code_variants(code):
+                if key in bulk_daily_map:
+                    df = bulk_daily_map[key]
+                    break
+            if df is None:
+                df = ds.get_stock_daily(code)
             if len(df) < cfg.min_history_days:
                 continue
 

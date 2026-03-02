@@ -15,4 +15,7 @@ def filter_stock_pool(spot_df: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
         mktcap = pd.to_numeric(df["mktcap"], errors="coerce")
         df = df[(mktcap >= cfg.mkt_cap_min) & (mktcap <= cfg.mkt_cap_max)]
 
-    return df.head(cfg.scan_limit).reset_index(drop=True)
+    if cfg.scan_limit and cfg.scan_limit > 0:
+        df = df.head(cfg.scan_limit)
+
+    return df.reset_index(drop=True)

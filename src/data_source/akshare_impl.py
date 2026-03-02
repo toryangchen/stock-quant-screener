@@ -270,7 +270,7 @@ class AkShareDataSource(DataSource):
             ]
         )
         out = self._normalize_daily(df, volume_optional=False)
-        self.cache.set_df(cache_key, out)
+        self.cache.set_df(cache_key, out, tail_rows=60)
         return out
 
     def get_etf_daily(self, code: str) -> pd.DataFrame:
@@ -308,5 +308,5 @@ class AkShareDataSource(DataSource):
             ]
         )
         out = self._normalize_daily(df, volume_optional=True)
-        self.cache.set_df(cache_key, out)
+        self.cache.set_df(cache_key, out, tail_rows=120)
         return out
