@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
+import time
+from contextlib import contextmanager
 from collections.abc import Callable, Iterable
 from datetime import datetime
 
@@ -19,6 +23,7 @@ class AkShareDataSource(DataSource):
         except ImportError as exc:
             raise RuntimeError("akshare 未安装，请先执行: pip install -r requirements.txt") from exc
         self.ak = ak
+        self.logger = logging.getLogger("quant_screener")
         self.cache = MongoDataCache()
         self._http = requests.Session()
         self._http.headers.update(
@@ -27,6 +32,33 @@ class AkShareDataSource(DataSource):
                 "Referer": "https://finance.sina.com.cn",
             }
         )
+
+    @contextmanager
+    def _temporarily_disable_proxy(self):
+        proxy_keys = [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ]
+        old = {k: os.environ.get(k) for k in proxy_keys}
+        try:
+            for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]:
+                os.environ.pop(k, None)
+            os.environ["NO_PROXY"] = "*"
+            os.environ["no_proxy"] = "*"
+            yield
+        finally:
+            for k in proxy_keys:
+                v = old[k]
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def _pick_col(self, df: pd.DataFrame, candidates: Iterable[str], target: str) -> str:
         for col in candidates:
@@ -59,6 +91,11 @@ class AkShareDataSource(DataSource):
     def _normalize_daily(self, df: pd.DataFrame, volume_optional: bool = False) -> pd.DataFrame:
         date_col = self._pick_col(df, ["日期", "date", "Date", "交易日期"], "date")
         close_col = self._pick_col(df, ["收盘", "close", "Close"], "close")
+        low_col = None
+        for candidate in ["最低", "low", "Low"]:
+            if candidate in df.columns:
+                low_col = candidate
+                break
 
         vol_col = None
         for candidate in ["成交量", "volume", "Volume", "成交量(手)", "amount", "成交额"]:
@@ -69,16 +106,27 @@ class AkShareDataSource(DataSource):
         if vol_col is None and not volume_optional:
             raise ValueError(f"缺少字段 'volume'，接口字段可能变动，需更新映射。当前列: {list(df.columns)}")
 
-        if vol_col is None:
-            out = df[[date_col, close_col]].copy()
-            out.columns = ["date", "close"]
+        keep_cols = [date_col, close_col]
+        if low_col is not None:
+            keep_cols.append(low_col)
+        if vol_col is not None:
+            keep_cols.append(vol_col)
+
+        out = df[keep_cols].copy()
+        rename_map = {date_col: "date", close_col: "close"}
+        if low_col is not None:
+            rename_map[low_col] = "low"
+        if vol_col is not None:
+            rename_map[vol_col] = "volume"
+        out = out.rename(columns=rename_map)
+        if "low" not in out.columns:
+            out["low"] = pd.NA
+        if "volume" not in out.columns:
             out["volume"] = pd.NA
-        else:
-            out = df[[date_col, close_col, vol_col]].copy()
-            out.columns = ["date", "close", "volume"]
 
         out["date"] = pd.to_datetime(out["date"], errors="coerce")
         out["close"] = pd.to_numeric(out["close"], errors="coerce")
+        out["low"] = pd.to_numeric(out["low"], errors="coerce")
         out["volume"] = pd.to_numeric(out["volume"], errors="coerce")
 
         required_cols = ["date", "close"] if volume_optional else ["date", "close", "volume"]
@@ -166,8 +214,91 @@ class AkShareDataSource(DataSource):
             # [date, open, close, ..., low, high, ..., volume, amount, ...]
             if len(item) < 9:
                 continue
-            rows.append({"date": item[0], "close": item[2], "volume": item[8]})
+            rows.append({"date": item[0], "close": item[2], "low": item[5], "volume": item[8]})
         return pd.DataFrame(rows)
+
+    def _fetch_eastmoney_spot_with_mktcap(self) -> pd.DataFrame:
+        # 备用：直接请求 Eastmoney push2 接口，返回 code/name/mktcap
+        # 字段: f12=代码, f14=名称, f20=总市值(元)
+        urls = [
+            "https://push2.eastmoney.com/api/qt/clist/get",
+            "https://82.push2.eastmoney.com/api/qt/clist/get",
+        ]
+        params = {
+            "pn": 1,
+            "pz": 10000,
+            "po": 1,
+            "np": 1,
+            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+            "fltt": 2,
+            "invt": 2,
+            "fid": "f12",
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+            "fields": "f12,f14,f20",
+        }
+
+        last_exc: Exception | None = None
+        data = None
+        for mode in ["default", "disable_proxy"]:
+            for url in urls:
+                for _ in range(3):
+                    try:
+                        if mode == "disable_proxy":
+                            with self._temporarily_disable_proxy():
+                                resp = requests.get(
+                                    url,
+                                    params=params,
+                                    timeout=10,
+                                    headers={
+                                        "User-Agent": "Mozilla/5.0",
+                                        "Referer": "https://quote.eastmoney.com",
+                                    },
+                                )
+                        else:
+                            resp = requests.get(
+                                url,
+                                params=params,
+                                timeout=10,
+                                headers={
+                                    "User-Agent": "Mozilla/5.0",
+                                    "Referer": "https://quote.eastmoney.com",
+                                },
+                            )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        if ((data or {}).get("data") or {}).get("diff"):
+                            break
+                    except Exception as exc:
+                        last_exc = exc
+                        time.sleep(0.3)
+                if ((data or {}).get("data") or {}).get("diff"):
+                    break
+            if ((data or {}).get("data") or {}).get("diff"):
+                break
+
+        if not ((data or {}).get("data") or {}).get("diff"):
+            if last_exc is not None:
+                raise RuntimeError(f"Eastmoney 市值接口不可用: {last_exc}")
+            raise RuntimeError("Eastmoney 市值接口返回空数据")
+
+        diff = ((data or {}).get("data") or {}).get("diff") or []
+        if not diff:
+            return pd.DataFrame()
+
+        rows: list[dict] = []
+        for item in diff:
+            code = str(item.get("f12", "")).strip()
+            name = str(item.get("f14", "")).strip()
+            mktcap = item.get("f20")
+            if not code or not name:
+                continue
+            rows.append({"code": self._normalize_code(code), "name": name, "mktcap": mktcap})
+
+        out = pd.DataFrame(rows)
+        if out.empty:
+            return out
+        out["mktcap"] = pd.to_numeric(out["mktcap"], errors="coerce")
+        return out
 
     def get_sina_realtime_quote(self, market_symbol: str) -> dict[str, str]:
         # 方法1: 新浪实时盘口，供后续扩展（当前主流程未使用）
@@ -199,11 +330,14 @@ class AkShareDataSource(DataSource):
         cache_key = "akshare:a_spot"
         cached = self.cache.get_df(cache_key)
         if cached is not None and not cached.empty:
-            return cached
+            if "mktcap" in cached.columns:
+                return cached
+            self.logger.info("akshare:a_spot 缓存缺少 mktcap，尝试刷新数据源")
 
         df = self._run_with_fallback(
             [
                 ("stock_zh_a_spot_em", lambda: self.ak.stock_zh_a_spot_em()),
+                ("eastmoney_push2_mktcap", self._fetch_eastmoney_spot_with_mktcap),
                 ("stock_zh_a_spot", lambda: self.ak.stock_zh_a_spot()),
                 ("stock_info_a_code_name", lambda: self.ak.stock_info_a_code_name()),
             ]

@@ -59,7 +59,13 @@ class MongoDataCache:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df
 
-    def set_df(self, key: str, df: pd.DataFrame, tail_rows: int | None = None) -> None:
+    def set_df(
+        self,
+        key: str,
+        df: pd.DataFrame,
+        tail_rows: int | None = None,
+        meta: dict | None = None,
+    ) -> None:
         if not self._is_ready() or df.empty:
             return
 
@@ -79,4 +85,13 @@ class MongoDataCache:
             "expires_at": expires_at,
             "data": out.to_dict(orient="records"),
         }
+        # 保留历史文档中的额外顶层字段（例如 mktcap）
+        old = self._coll.find_one({"_id": key})
+        if old:
+            for k, v in old.items():
+                if k not in {"_id", "cached_at", "expires_at", "data"}:
+                    payload[k] = v
+        if meta:
+            for k, v in meta.items():
+                payload[k] = v
         self._coll.replace_one({"_id": key}, payload, upsert=True)

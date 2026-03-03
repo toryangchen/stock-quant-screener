@@ -11,45 +11,95 @@ from src.config import AppConfig, load_config
 from src.output.logger import setup_logger
 
 
-def apply_secondary_breakout_filter(candidates, logger: logging.Logger):
+def _get_hs300_ret20(ds, logger: logging.Logger) -> float | None:
     import pandas as pd
 
-    if len(candidates) <= 100:
-        return candidates
+    try:
+        hs300 = ds.get_etf_daily("510300")
+        if hs300 is None or hs300.empty or len(hs300) < 21:
+            return None
+        close = pd.to_numeric(hs300["close"], errors="coerce")
+        close_t = float(close.iloc[-1])
+        close_t_20 = float(close.iloc[-21])
+        if close_t_20 <= 0:
+            return None
+        return close_t / close_t_20 - 1.0
+    except Exception as exc:
+        logger.warning("相对强度过滤跳过：无法获取沪深300近20日涨幅: %s", exc)
+        return None
+
+
+def apply_secondary_breakout_filter(ds, cfg: AppConfig, candidates, logger: logging.Logger):
+    import pandas as pd
 
     df2 = candidates.copy()
     original_count = len(df2)
+    if df2.empty:
+        return df2
 
     df2["vol_ratio"] = pd.to_numeric(df2.get("vol_ratio"), errors="coerce")
     df2["entry_price"] = pd.to_numeric(df2.get("entry_price"), errors="coerce")
     df2["stop_price"] = pd.to_numeric(df2.get("stop_price"), errors="coerce")
+    df2["risk_pct"] = pd.to_numeric(df2.get("risk_pct"), errors="coerce")
     df2["close"] = pd.to_numeric(df2.get("close"), errors="coerce")
+    df2["ma20_price"] = pd.to_numeric(df2.get("ma20_price"), errors="coerce")
 
     # 1) 量能过滤
-    df2 = df2[(df2["vol_ratio"] >= 2.0) & (df2["vol_ratio"] <= 6.0)]
+    df2 = df2[(df2["vol_ratio"] >= cfg.secondary_vol_min) & (df2["vol_ratio"] <= cfg.secondary_vol_max)]
 
     # 2) 止损空间过滤
-    df2["risk_pct"] = (df2["entry_price"] - df2["stop_price"]) / df2["entry_price"]
-    df2 = df2[(df2["risk_pct"] >= 0.04) & (df2["risk_pct"] <= 0.08)]
+    missing_risk = df2["risk_pct"].isna()
+    if missing_risk.any():
+        df2.loc[missing_risk, "risk_pct"] = (
+            (df2.loc[missing_risk, "entry_price"] - df2.loc[missing_risk, "stop_price"])
+            / df2.loc[missing_risk, "entry_price"]
+        )
+    df2 = df2[(df2["risk_pct"] >= cfg.secondary_risk_min) & (df2["risk_pct"] <= cfg.secondary_risk_max)]
 
     # 3) 涨幅过滤（如果有）
     if "pct_chg" in df2.columns:
         df2["pct_chg"] = pd.to_numeric(df2["pct_chg"], errors="coerce")
-        df2 = df2[df2["pct_chg"] >= 0.04]
+        df2 = df2[df2["pct_chg"] >= cfg.pct_chg_min]
 
     # 4) 市值过滤（如果有）
     if "mkt_cap" in df2.columns:
         df2["mkt_cap"] = pd.to_numeric(df2["mkt_cap"], errors="coerce")
-        mkt_cap_valid = df2["mkt_cap"].notna()
-        if mkt_cap_valid.any():
-            df2 = df2[(~mkt_cap_valid) | ((df2["mkt_cap"] >= 100e8) & (df2["mkt_cap"] <= 600e8))]
+        mkt_cap_valid = df2["mkt_cap"].notna() & (df2["mkt_cap"] >= 100e8) & (df2["mkt_cap"] <= 600e8)
+        if cfg.secondary_mkt_cap_missing_policy == "exclude":
+            df2 = df2[mkt_cap_valid]
+        elif cfg.secondary_mkt_cap_missing_policy == "keep_with_penalty":
+            df2 = df2[mkt_cap_valid | df2["mkt_cap"].isna()]
+        else:
+            df2 = df2[mkt_cap_valid | df2["mkt_cap"].isna()]
 
-    # 5) 价格过滤
-    df2 = df2[df2["close"] <= 60]
+    # 5) 价格与乖离过滤
+    df2 = df2[df2["close"] <= cfg.secondary_close_max]
+    df2["ma20_gap"] = (df2["close"] - df2["ma20_price"]) / df2["ma20_price"]
+    df2 = df2[df2["ma20_gap"] <= cfg.secondary_ma20_gap_max]
 
-    # 最终排序
-    df2 = df2.sort_values(["vol_ratio", "risk_pct"], ascending=[True, True]).reset_index(drop=True)
-    logger.info("二次筛选已执行: 初筛 %s 只 -> 二筛 %s 只", original_count, len(df2))
+    # 6) 可选：相对强度（强于沪深300近20日）
+    if cfg.secondary_require_relative_strength and "ret_20_stock" in df2.columns:
+        df2["ret_20_stock"] = pd.to_numeric(df2["ret_20_stock"], errors="coerce")
+        hs300_ret20 = _get_hs300_ret20(ds, logger)
+        if hs300_ret20 is not None:
+            df2 = df2[df2["ret_20_stock"] > hs300_ret20]
+
+    # 7) 质量评分排序
+    df2["score"] = (
+        (df2["vol_ratio"] - cfg.vol_target).abs() * cfg.secondary_score_w1_vol
+        + (df2["risk_pct"] - 0.06).abs() * cfg.secondary_score_w2_risk
+        + df2["ma20_gap"] * cfg.secondary_score_w3_gap
+    )
+    if cfg.secondary_mkt_cap_missing_policy == "keep_with_penalty" and "mkt_cap" in df2.columns:
+        df2.loc[df2["mkt_cap"].isna(), "score"] = (
+            df2.loc[df2["mkt_cap"].isna(), "score"] + cfg.secondary_mkt_cap_missing_penalty
+        )
+
+    df2 = df2.sort_values(["score", "code"], ascending=[True, True]).reset_index(drop=True)
+    if cfg.secondary_take_top_n > 0:
+        df2 = df2.head(cfg.secondary_take_top_n).reset_index(drop=True)
+
+    logger.info("二次筛选已执行(恒定触发): 初筛 %s 只 -> 二筛 %s 只", original_count, len(df2))
     return df2
 
 
@@ -70,7 +120,7 @@ def load_env_file(env_path: Path = Path(".env")) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="A-share quant screener demo")
-    parser.add_argument("command", choices=["etf", "breakout", "all"])
+    parser.add_argument("command", choices=["etf", "breakout", "sync", "all"])
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--scan-limit", type=int, default=None)
     parser.add_argument("--risk-per-trade", type=float, default=None)
@@ -112,26 +162,57 @@ def run_breakout_module(
     filter_stock_pool = import_module("src.logic.filters").filter_stock_pool
     run_trend_breakout = import_module("src.logic.trend_breakout").run_trend_breakout
     writer = import_module("src.output.writer")
+    history_store = import_module("src.output.mongo_history").MongoScreeningHistory()
     try:
+        # 每日筛选前按需同步：
+        # - 当日快照已存在 -> 直接使用缓存，不重复全量拉取
+        # - 当日快照不存在 -> 执行全量同步（首次筛选场景）
+        if hasattr(ds, "sync_market_daily"):
+            need_sync = True
+            if hasattr(ds, "has_today_snapshot"):
+                try:
+                    need_sync = not bool(ds.has_today_snapshot())
+                except Exception:
+                    need_sync = True
+
+            if need_sync:
+                try:
+                    sync_stats = ds.sync_market_daily()
+                    logger.info(
+                        "筛选前同步完成: total=%s, ok=%s, failed=%s",
+                        sync_stats.get("total", 0),
+                        sync_stats.get("ok", 0),
+                        sync_stats.get("failed", 0),
+                    )
+                except Exception as exc:
+                    logger.warning("筛选前同步失败，继续使用当前缓存数据: %s", exc)
+            else:
+                logger.info("检测到当日交易快照已存在，跳过全量同步")
+
         spot = ds.get_a_spot()
         pool = filter_stock_pool(spot, cfg)
-        candidates = run_trend_breakout(
+        primary_candidates = run_trend_breakout(
             ds=ds, stock_pool_df=pool, cfg=cfg, logger=logger, pause_note=pause_note
         )
-        candidates = apply_secondary_breakout_filter(candidates, logger)
+        candidates = apply_secondary_breakout_filter(ds, cfg, primary_candidates, logger)
     except Exception as exc:
         logger.warning("趋势突破股票池拉取失败，降级为空结果: %s", exc)
         import pandas as pd
 
-        candidates = pd.DataFrame(
+        primary_candidates = pd.DataFrame(
             columns=[
                 "code",
                 "name",
                 "close",
                 "is_60d_high",
                 "vol_ratio",
+                "vol_score",
                 "pct_chg",
+                "ret_20_stock",
                 "mkt_cap",
+                "ma20_price",
+                "ma10_price",
+                "low_t",
                 "risk_pct",
                 "entry_price",
                 "stop_price",
@@ -140,6 +221,43 @@ def run_breakout_module(
                 "note",
             ]
         )
+        candidates = pd.DataFrame(
+            columns=[
+                "code",
+                "name",
+                "close",
+                "is_60d_high",
+                "vol_ratio",
+                "vol_score",
+                "pct_chg",
+                "ret_20_stock",
+                "mkt_cap",
+                "ma20_price",
+                "ma10_price",
+                "low_t",
+                "risk_pct",
+                "ma20_gap",
+                "score",
+                "entry_price",
+                "stop_price",
+                "suggested_shares",
+                "suggested_position_value",
+                "note",
+            ]
+        )
+
+    run_date = cfg.run_date.strftime("%Y-%m-%d")
+    saved_primary, saved_secondary = history_store.save_daily(
+        run_date=run_date,
+        primary_df=primary_candidates,
+        secondary_df=candidates,
+    )
+    logger.info(
+        "Mongo 筛选记录已保存(单表去重): date=%s, total=%s, secondary=%s",
+        run_date,
+        saved_primary,
+        saved_secondary,
+    )
     writer.write_dataframe(
         candidates,
         cfg.output_dir / "trend_breakout_candidates.csv",
@@ -148,6 +266,19 @@ def run_breakout_module(
     )
     logger.info("趋势突破完成: 候选 %s 只", len(candidates))
     return candidates
+
+
+def run_sync_module(ds, logger: logging.Logger) -> None:
+    if not hasattr(ds, "sync_market_daily"):
+        logger.warning("当前 DataSource 不支持 sync 命令，已跳过")
+        return
+    stats = ds.sync_market_daily()
+    logger.info(
+        "日度全量同步完成: total=%s, ok=%s, failed=%s",
+        stats.get("total", 0),
+        stats.get("ok", 0),
+        stats.get("failed", 0),
+    )
 
 
 def run_all(ds, cfg: AppConfig, logger: logging.Logger) -> None:
@@ -202,18 +333,23 @@ def main() -> int:
         return 1
 
     try:
-        ts_token = os.getenv("TUSHARE_TOKEN", "").strip()
-        if ts_token:
-            try:
-                ds = import_module("src.data_source.tushare_impl").TushareDataSource(token=ts_token)
-                logger.info("DataSource 使用 Tushare(日线) + AkShare(ETF备用)")
-            except Exception as exc:
-                logger.warning("Tushare 初始化失败，回退 AkShare: %s", exc)
+        try:
+            ds = import_module("src.data_source.mairui_impl").MairuiDataSource()
+            logger.info("DataSource 使用 Mairui(主) + Tushare/AkShare(备用)")
+        except Exception as exc:
+            logger.warning("Mairui 初始化失败，回退旧数据源链路: %s", exc)
+            ts_token = os.getenv("TUSHARE_TOKEN", "").strip()
+            if ts_token:
+                try:
+                    ds = import_module("src.data_source.tushare_impl").TushareDataSource(token=ts_token)
+                    logger.info("DataSource 使用 Tushare(日线) + AkShare(ETF备用)")
+                except Exception as exc2:
+                    logger.warning("Tushare 初始化失败，回退 AkShare: %s", exc2)
+                    ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
+                    logger.info("DataSource 使用 AkShare")
+            else:
                 ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
-                logger.info("DataSource 使用 AkShare")
-        else:
-            ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
-            logger.info("未检测到 TUSHARE_TOKEN，DataSource 使用 AkShare")
+                logger.info("未检测到 TUSHARE_TOKEN，DataSource 使用 AkShare")
     except Exception as exc:
         logger.error("DataSource 初始化失败: %s", exc)
         return 2
@@ -223,6 +359,8 @@ def main() -> int:
             run_etf_module(ds, cfg, logger)
         elif args.command == "breakout":
             run_breakout_module(ds, cfg, logger, pause_note="")
+        elif args.command == "sync":
+            run_sync_module(ds, logger)
         else:
             run_all(ds, cfg, logger)
         return 0

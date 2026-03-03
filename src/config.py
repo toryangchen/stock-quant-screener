@@ -26,8 +26,11 @@ class AppConfig:
 
     lookback_high: int = 60
     vol_avg_window: int = 20
-    vol_multiplier: float = 1.5
+    vol_multiplier: float = 1.8
+    vol_target: float = 3.0
     min_history_days: int = 60
+    pct_chg_min: float = 0.04
+    require_ma_bullish_stack: bool = False
     exclude_st: bool = True
 
     mkt_cap_filter_enabled: bool = False
@@ -36,6 +39,20 @@ class AppConfig:
 
     scan_limit: int = 0
     sleep_seconds: float = 0.15
+
+    secondary_vol_min: float = 2.0
+    secondary_vol_max: float = 6.0
+    secondary_risk_min: float = 0.04
+    secondary_risk_max: float = 0.08
+    secondary_close_max: float = 60.0
+    secondary_ma20_gap_max: float = 0.10
+    secondary_take_top_n: int = 0
+    secondary_score_w1_vol: float = 1.0
+    secondary_score_w2_risk: float = 20.0
+    secondary_score_w3_gap: float = 10.0
+    secondary_require_relative_strength: bool = False
+    secondary_mkt_cap_missing_policy: str = "exclude"
+    secondary_mkt_cap_missing_penalty: float = 1.0
 
     account_capital: float = 20000
     risk_per_trade_pct: float = 0.02
