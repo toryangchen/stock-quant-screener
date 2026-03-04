@@ -47,6 +47,7 @@ cp .env.example .env
 python -m scripts.main etf
 python -m scripts.main breakout
 python -m scripts.main ingest
+python -m scripts.main retry-mktcap --trade-date 20260304
 python -m scripts.main all
 ```
 

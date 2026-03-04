@@ -70,6 +70,14 @@ class MongoProgressLogger:
         except Exception:
             pass
 
+    def write_many(self, docs: list[dict]) -> None:
+        if not self.enabled or self._coll is None or not docs:
+            return
+        try:
+            self._coll.insert_many(docs, ordered=False)
+        except Exception:
+            pass
+
 
 def _load_env_file(env_path: Path = Path(".env")) -> None:
     if not env_path.exists():
@@ -197,7 +205,7 @@ def fetch_akshare_enrichment_per_stock(
     progress_logger: MongoProgressLogger | None = None,
     run_id: str = "",
     trade_date: str = "",
-) -> dict[str, dict]:
+) -> tuple[dict[str, dict], list[dict]]:
     import akshare as ak  # type: ignore
 
     sleep_sec = float(os.getenv("AK_ENRICH_SLEEP_SECONDS", "0.25"))
@@ -212,11 +220,13 @@ def fetch_akshare_enrichment_per_stock(
     end_date = datetime.now().strftime("%Y%m%d")
 
     result: dict[str, dict] = {}
+    failed_mktcap: list[dict] = []
     for idx, code in enumerate(codes, start=1):
         code6 = _norm_code(code)
         em_symbol = _to_em_symbol(code6)
         mktcap = None
         turnover_rate = None
+        mktcap_error = ""
 
         # 1) mktcap: stock_zh_scale_comparison_em
         if not em_symbol.startswith("BJ"):
@@ -230,8 +240,13 @@ def fetch_akshare_enrichment_per_stock(
                             if pd.notna(mv):
                                 mktcap = float(mv)
                     break
-                except Exception:
+                except Exception as exc:
+                    mktcap_error = str(exc)[:300]
                     time.sleep(0.2)
+        if mktcap is None:
+            if not mktcap_error:
+                mktcap_error = "empty_or_no_match"
+            failed_mktcap.append({"code": code6, "reason": mktcap_error})
 
         # 2) turnover_rate: stock_zh_a_hist (最近窗口取最后有效值)
         for _ in range(max_retries + 1):
@@ -272,7 +287,7 @@ def fetch_akshare_enrichment_per_stock(
         if sleep_sec > 0:
             time.sleep(sleep_sec)
 
-    return result
+    return result, failed_mktcap
 
 
 def write_local_snapshot(df: pd.DataFrame, trade_date: str, logger: logging.Logger) -> Path:
@@ -391,7 +406,7 @@ def run_daily_market_ingest(logger: logging.Logger) -> IngestResult:
     )
 
     # 逐只补充 AkShare 字段：mktcap + turnover_rate
-    enrich_map = fetch_akshare_enrichment_per_stock(
+    enrich_map, failed_mktcap = fetch_akshare_enrichment_per_stock(
         merged["code"].astype(str).tolist(),
         logger=logger,
         progress_logger=progress_logger,
@@ -406,6 +421,23 @@ def run_daily_market_ingest(logger: logging.Logger) -> IngestResult:
         axis=1,
     )
     mkt_filled = int(pd.to_numeric(merged["mktcap"], errors="coerce").notna().sum())
+    if failed_mktcap:
+        progress_logger.write_many(
+            [
+                {
+                    "run_id": run_id,
+                    "trade_date": trade_date,
+                    "stage": "mktcap_failed",
+                    "code": item["code"],
+                    "reason": item.get("reason", ""),
+                    "retry_status": "pending",
+                    "retry_count": 0,
+                    "created_at": datetime.utcnow(),
+                }
+                for item in failed_mktcap
+            ]
+        )
+        logger.info("mktcap 拉取失败已记录到 log: %s 只", len(failed_mktcap))
 
     snapshot_file = write_local_snapshot(merged, trade_date=trade_date, logger=logger)
     mongo_upserts = upload_snapshot_to_mongo(
@@ -433,3 +465,73 @@ def run_daily_market_ingest(logger: logging.Logger) -> IngestResult:
         mongo_upserts=int(mongo_upserts),
         snapshot_file=str(snapshot_file),
     )
+
+
+def retry_failed_mktcap(logger: logging.Logger, trade_date: str | None = None) -> dict[str, int]:
+    _load_env_file(Path(".env"))
+    progress_logger = MongoProgressLogger()
+    if not progress_logger.enabled or progress_logger._coll is None:
+        raise RuntimeError("Mongo log collection 不可用，无法重试 mktcap")
+
+    import akshare as ak  # type: ignore
+
+    uri = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017").strip()
+    db_name = os.getenv("MONGO_DB", "quant_screener").strip() or "quant_screener"
+    coll_name = os.getenv("MONGO_COLLECTION", "market_cache").strip() or "market_cache"
+    cache_coll = MongoClient(uri)[db_name][coll_name]
+    log_coll = progress_logger._coll
+
+    query = {"stage": "mktcap_failed", "retry_status": {"$ne": "success"}}
+    if trade_date:
+        query["trade_date"] = trade_date
+    else:
+        latest = log_coll.find({"stage": "mktcap_failed"}, {"trade_date": 1}).sort("created_at", -1).limit(1)
+        latest_row = next(latest, None)
+        if latest_row and latest_row.get("trade_date"):
+            query["trade_date"] = latest_row["trade_date"]
+
+    rows = list(log_coll.find(query, {"_id": 1, "code": 1, "trade_date": 1, "retry_count": 1}))
+    if not rows:
+        logger.info("没有待重试的 mktcap 失败记录")
+        return {"total": 0, "success": 0, "failed": 0}
+
+    success, failed = 0, 0
+    for idx, row in enumerate(rows, start=1):
+        code = _norm_code(str(row.get("code", "")))
+        symbol = _to_em_symbol(code)
+        mktcap = None
+        err = ""
+        try:
+            if not symbol.startswith("BJ"):
+                df = ak.stock_zh_scale_comparison_em(symbol=symbol)
+                if df is not None and not df.empty and {"代码", "总市值"}.issubset(df.columns):
+                    hit = df[df["代码"].astype(str).str.zfill(6) == code]
+                    if not hit.empty:
+                        mv = pd.to_numeric(hit.iloc[0]["总市值"], errors="coerce")
+                        if pd.notna(mv):
+                            mktcap = float(mv)
+        except Exception as exc:
+            err = str(exc)[:300]
+
+        if mktcap is not None:
+            cache_coll.update_one({"_id": code}, {"$set": {"mktcap": mktcap, "updated_at": datetime.utcnow()}}, upsert=True)
+            log_coll.update_one(
+                {"_id": row["_id"]},
+                {"$set": {"retry_status": "success", "retried_at": datetime.utcnow(), "mktcap": mktcap}},
+            )
+            success += 1
+        else:
+            log_coll.update_one(
+                {"_id": row["_id"]},
+                {
+                    "$set": {"retry_status": "failed", "retried_at": datetime.utcnow(), "retry_error": err or "empty_or_no_match"},
+                    "$inc": {"retry_count": 1},
+                },
+            )
+            failed += 1
+
+        if idx % 200 == 0:
+            logger.info("mktcap 重试进度: %s/%s, success=%s, failed=%s", idx, len(rows), success, failed)
+
+    logger.info("mktcap 重试完成: total=%s, success=%s, failed=%s", len(rows), success, failed)
+    return {"total": len(rows), "success": success, "failed": failed}

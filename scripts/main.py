@@ -120,11 +120,12 @@ def load_env_file(env_path: Path = Path(".env")) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="A-share quant screener demo")
-    parser.add_argument("command", choices=["etf", "breakout", "sync", "ingest", "all"])
+    parser.add_argument("command", choices=["etf", "breakout", "sync", "ingest", "retry-mktcap", "all"])
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--scan-limit", type=int, default=None)
     parser.add_argument("--risk-per-trade", type=float, default=None)
     parser.add_argument("--sleep", type=float, default=None)
+    parser.add_argument("--trade-date", default=None, help="YYYYMMDD, for retry-mktcap")
     return parser.parse_args()
 
 
@@ -296,6 +297,17 @@ def run_ingest_module(logger: logging.Logger) -> None:
     )
 
 
+def run_retry_mktcap_module(logger: logging.Logger, trade_date: str | None = None) -> None:
+    ingest = import_module("scripts.jobs.daily_market_ingest")
+    stats = ingest.retry_failed_mktcap(logger=logger, trade_date=trade_date)
+    logger.info(
+        "mktcap 失败重试完成: total=%s, success=%s, failed=%s",
+        stats.get("total", 0),
+        stats.get("success", 0),
+        stats.get("failed", 0),
+    )
+
+
 def run_all(ds, cfg: AppConfig, logger: logging.Logger) -> None:
     performance = import_module("scripts.logic.performance")
     equity_curve = import_module("scripts.logic.equity_curve")
@@ -350,6 +362,13 @@ def main() -> int:
     if args.command == "ingest":
         try:
             run_ingest_module(logger)
+            return 0
+        except Exception as exc:
+            logger.error("执行失败: %s", exc)
+            return 3
+    if args.command == "retry-mktcap":
+        try:
+            run_retry_mktcap_module(logger, trade_date=args.trade_date)
             return 0
         except Exception as exc:
             logger.error("执行失败: %s", exc)
