@@ -93,6 +93,9 @@ class TushareDataSource(DataSource):
     def _legacy_stock_cache_key(self, ts_code: str) -> str:
         return f"tushare:stock_daily:{str(ts_code).upper()}"
 
+    def _digit_stock_cache_key(self, code: str) -> str:
+        return self._normalize_code(code)
+
     def _load_mktcap_map(self) -> dict[str, float]:
         if self._mktcap_map_cache is not None:
             return self._mktcap_map_cache
@@ -102,22 +105,7 @@ class TushareDataSource(DataSource):
             return result
 
         coll = self.cache._coll
-        try:
-            latest_snap = coll.find(
-                {"_id": {"$regex": r"^mairui:daily_snapshot:\d{8}$"}},
-                {"_id": 1, "data": 1},
-            ).sort("_id", -1).limit(1)
-            snap_doc = next(latest_snap, None)
-            if snap_doc and snap_doc.get("data"):
-                for row in snap_doc["data"]:
-                    code = self._normalize_code(str(row.get("code", "")))
-                    mv = pd.to_numeric(row.get("mktcap"), errors="coerce")
-                    if code and pd.notna(mv):
-                        result[code] = float(mv)
-        except Exception:
-            pass
-
-        for spot_key in ["akshare:a_spot", "mairui:a_spot", "tushare:a_spot"]:
+        for spot_key in ["akshare:a_spot", "tushare:a_spot"]:
             try:
                 spot = self.cache.get_df(spot_key)
                 if spot is None or spot.empty or "code" not in spot.columns or "mktcap" not in spot.columns:
@@ -129,6 +117,21 @@ class TushareDataSource(DataSource):
                         result[code] = float(mv)
             except Exception:
                 continue
+
+        # 兜底：从个股文档顶层 mktcap 读取（_id 为 6 位代码）
+        if self.cache.enabled and self.cache._coll is not None:
+            try:
+                cursor = self.cache._coll.find(  # type: ignore[union-attr]
+                    {"_id": {"$regex": r"^\d{6}$"}, "mktcap": {"$ne": None}},
+                    {"_id": 1, "mktcap": 1},
+                )
+                for doc in cursor:
+                    code = self._normalize_code(str(doc.get("_id", "")))
+                    mv = pd.to_numeric(doc.get("mktcap"), errors="coerce")
+                    if code and pd.notna(mv) and code not in result:
+                        result[code] = float(mv)
+            except Exception:
+                pass
 
         self._mktcap_map_cache = result
         return result
@@ -182,6 +185,94 @@ class TushareDataSource(DataSource):
         compact_out = out.drop(columns=["trade_date"])
         self.cache.set_df(cache_key, compact_out)
         return out
+
+    def has_today_snapshot(self) -> bool:
+        today = datetime.now().strftime("%Y%m%d")
+        snap = self.cache.get_df(f"tushare:daily_snapshot:{today}")
+        return snap is not None and not snap.empty
+
+    def _append_or_create_stock_daily(self, ts_code: str, row: dict) -> None:
+        cache_key = self._stock_cache_key(ts_code)
+        cached = self.cache.get_df(cache_key)
+        if cached is None or cached.empty:
+            legacy = self.cache.get_df(self._legacy_stock_cache_key(ts_code))
+            cached = legacy if legacy is not None else pd.DataFrame(columns=["date", "close", "volume", "low"])
+
+        if "mktcap" in cached.columns:
+            cached = cached.drop(columns=["mktcap"])
+        if "low" not in cached.columns:
+            cached["low"] = pd.to_numeric(cached.get("close"), errors="coerce")
+
+        new_row = pd.DataFrame([row])
+        out = new_row if cached.empty else pd.concat([cached, new_row], ignore_index=True)
+        out["date"] = pd.to_datetime(out["date"], errors="coerce")
+        out["close"] = pd.to_numeric(out["close"], errors="coerce")
+        out["volume"] = pd.to_numeric(out["volume"], errors="coerce")
+        out["low"] = pd.to_numeric(out["low"], errors="coerce")
+        out = out.dropna(subset=["date", "close", "volume", "low"])
+        out = out.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+        self.cache.set_df(
+            cache_key,
+            self._strip_row_mktcap(out),
+            tail_rows=60,
+            meta={"mktcap": self._get_mktcap(str(ts_code).split(".")[0])},
+        )
+
+    def sync_market_daily(self) -> dict[str, int]:
+        today = datetime.now().strftime("%Y%m%d")
+        day_df = self._get_daily_by_trade_date(today)
+        if day_df is None or day_df.empty:
+            raise RuntimeError(f"Tushare daily({today}) 返回空数据")
+
+        required = ["ts_code", "trade_date", "close", "vol", "low"]
+        for col in required:
+            if col not in day_df.columns:
+                raise ValueError(f"daily 缺少字段 {col}, 当前: {list(day_df.columns)}")
+
+        day_df = day_df.copy()
+        day_df["trade_date"] = day_df["trade_date"].astype(str)
+        day_df["date"] = pd.to_datetime(day_df["trade_date"], format="%Y%m%d", errors="coerce")
+        day_df["close"] = pd.to_numeric(day_df["close"], errors="coerce")
+        day_df["vol"] = pd.to_numeric(day_df["vol"], errors="coerce")
+        day_df["low"] = pd.to_numeric(day_df["low"], errors="coerce")
+        day_df = day_df.dropna(subset=["date", "close", "vol", "low"])
+
+        snapshot_rows: list[dict] = []
+        ok, failed = 0, 0
+        for _, r in day_df.iterrows():
+            ts_code = str(r["ts_code"]).upper()
+            code = self._normalize_code(ts_code.split(".")[0])
+            row = {
+                "date": r["date"],
+                "close": float(r["close"]),
+                "volume": float(r["vol"]),
+                "low": float(r["low"]),
+            }
+            try:
+                self._append_or_create_stock_daily(ts_code, row)
+                ok += 1
+            except Exception:
+                failed += 1
+                continue
+
+            snapshot_rows.append(
+                {
+                    "code": code,
+                    "ts_code": ts_code,
+                    "close": float(r["close"]),
+                    "volume": float(r["vol"]),
+                    "low": float(r["low"]),
+                    "date": row["date"].strftime("%Y-%m-%d"),
+                }
+            )
+
+        if snapshot_rows:
+            self.cache.set_df(f"tushare:daily_snapshot:{today}", pd.DataFrame(snapshot_rows))
+            self.cache.set_df(
+                "tushare:sync_meta",
+                pd.DataFrame([{"sync_date": today, "ok": ok, "failed": failed, "total": len(day_df)}]),
+            )
+        return {"total": int(len(day_df)), "ok": int(ok), "failed": int(failed)}
 
     def _get_recent_trade_dates(self, min_days: int) -> list[str]:
         # 优先从缓存键恢复交易日，避免受 trade_cal 权限影响
@@ -241,6 +332,9 @@ class TushareDataSource(DataSource):
         for code, ts_code in code_to_ts.items():
             cache_key = self._stock_cache_key(ts_code)
             cached = self.cache.get_df(cache_key)
+            if cached is None or cached.empty:
+                digit_key = self._digit_stock_cache_key(code)
+                cached = self.cache.get_df(digit_key)
             if cached is None or cached.empty:
                 legacy = self._legacy_stock_cache_key(ts_code)
                 cached = self.cache.get_df(legacy)
@@ -350,6 +444,8 @@ class TushareDataSource(DataSource):
         ts_code = self._to_ts_code(code)
         cache_key = self._stock_cache_key(ts_code)
         cached = self.cache.get_df(cache_key)
+        if cached is None or cached.empty:
+            cached = self.cache.get_df(self._digit_stock_cache_key(code))
         if cached is None or cached.empty:
             legacy = self._legacy_stock_cache_key(ts_code)
             cached = self.cache.get_df(legacy)

@@ -120,7 +120,7 @@ def load_env_file(env_path: Path = Path(".env")) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="A-share quant screener demo")
-    parser.add_argument("command", choices=["etf", "breakout", "sync", "all"])
+    parser.add_argument("command", choices=["etf", "breakout", "sync", "ingest", "all"])
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--scan-limit", type=int, default=None)
     parser.add_argument("--risk-per-trade", type=float, default=None)
@@ -164,10 +164,9 @@ def run_breakout_module(
     writer = import_module("src.output.writer")
     history_store = import_module("src.output.mongo_history").MongoScreeningHistory()
     try:
-        # 每日筛选前按需同步：
-        # - 当日快照已存在 -> 直接使用缓存，不重复全量拉取
-        # - 当日快照不存在 -> 执行全量同步（首次筛选场景）
-        if hasattr(ds, "sync_market_daily"):
+        # 默认关闭筛选内自动同步，采集与筛选分离。
+        auto_sync = os.getenv("BREAKOUT_AUTO_SYNC", "false").lower() in {"1", "true", "yes", "on"}
+        if auto_sync and hasattr(ds, "sync_market_daily"):
             need_sync = True
             if hasattr(ds, "has_today_snapshot"):
                 try:
@@ -188,6 +187,8 @@ def run_breakout_module(
                     logger.warning("筛选前同步失败，继续使用当前缓存数据: %s", exc)
             else:
                 logger.info("检测到当日交易快照已存在，跳过全量同步")
+        else:
+            logger.info("筛选流程未启用自动同步，直接使用数据库/缓存数据")
 
         spot = ds.get_a_spot()
         pool = filter_stock_pool(spot, cfg)
@@ -281,6 +282,20 @@ def run_sync_module(ds, logger: logging.Logger) -> None:
     )
 
 
+def run_ingest_module(logger: logging.Logger) -> None:
+    ingest = import_module("src.jobs.daily_market_ingest")
+    result = ingest.run_daily_market_ingest(logger=logger)
+    logger.info(
+        "数据采集完成: trade_date=%s, list=%s, daily=%s, mktcap_filled=%s, mongo_upserts=%s, snapshot=%s",
+        result.trade_date,
+        result.stock_list_count,
+        result.daily_rows,
+        result.mktcap_filled,
+        result.mongo_upserts,
+        result.snapshot_file,
+    )
+
+
 def run_all(ds, cfg: AppConfig, logger: logging.Logger) -> None:
     performance = import_module("src.logic.performance")
     equity_curve = import_module("src.logic.equity_curve")
@@ -332,24 +347,27 @@ def main() -> int:
         logger.error("配置或输出目录初始化失败: %s", exc)
         return 1
 
-    try:
+    if args.command == "ingest":
         try:
-            ds = import_module("src.data_source.mairui_impl").MairuiDataSource()
-            logger.info("DataSource 使用 Mairui(主) + Tushare/AkShare(备用)")
+            run_ingest_module(logger)
+            return 0
         except Exception as exc:
-            logger.warning("Mairui 初始化失败，回退旧数据源链路: %s", exc)
-            ts_token = os.getenv("TUSHARE_TOKEN", "").strip()
-            if ts_token:
-                try:
-                    ds = import_module("src.data_source.tushare_impl").TushareDataSource(token=ts_token)
-                    logger.info("DataSource 使用 Tushare(日线) + AkShare(ETF备用)")
-                except Exception as exc2:
-                    logger.warning("Tushare 初始化失败，回退 AkShare: %s", exc2)
-                    ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
-                    logger.info("DataSource 使用 AkShare")
-            else:
+            logger.error("执行失败: %s", exc)
+            return 3
+
+    try:
+        ts_token = os.getenv("TUSHARE_TOKEN", "").strip()
+        if ts_token:
+            try:
+                ds = import_module("src.data_source.tushare_impl").TushareDataSource(token=ts_token)
+                logger.info("DataSource 使用 Tushare(日线) + AkShare(ETF备用)")
+            except Exception as exc:
+                logger.warning("Tushare 初始化失败，回退 AkShare: %s", exc)
                 ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
-                logger.info("未检测到 TUSHARE_TOKEN，DataSource 使用 AkShare")
+                logger.info("DataSource 使用 AkShare")
+        else:
+            ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
+            logger.info("未检测到 TUSHARE_TOKEN，DataSource 使用 AkShare")
     except Exception as exc:
         logger.error("DataSource 初始化失败: %s", exc)
         return 2
@@ -361,6 +379,8 @@ def main() -> int:
             run_breakout_module(ds, cfg, logger, pause_note="")
         elif args.command == "sync":
             run_sync_module(ds, logger)
+        elif args.command == "ingest":
+            run_ingest_module(logger)
         else:
             run_all(ds, cfg, logger)
         return 0

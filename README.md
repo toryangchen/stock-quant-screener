@@ -21,11 +21,25 @@ cp .env.example .env
 程序内置 Tushare 限流（默认每分钟 50 次），可通过 `TUSHARE_RATE_LIMIT_PER_MINUTE` 调整。
 程序支持 MongoDB 本地缓存（默认开启）：请求前先查缓存，命中则不再请求远端接口。
 
+## 数据采集与筛选分离
+
+- 数据采集：`python -m src.main ingest`
+- 股票筛选：`python -m src.main breakout`
+
+`ingest` 流程：
+
+1. 用 Tushare（失败则回退 AkShare）拉当日全量日线；
+2. 基于当日日线股票池，用 AkShare 逐只补充：`mktcap + turnover_rate`；
+4. 先写本地快照（`SNAPSHOT_DIR`），全部完成后再批量上传 Mongo。
+
+说明：`breakout` 默认不自动在线同步（`BREAKOUT_AUTO_SYNC=false`），只使用数据库/缓存数据；如需恢复旧行为可设为 `true`。
+
 ## 运行
 
 ```bash
 python -m src.main etf
 python -m src.main breakout
+python -m src.main ingest
 python -m src.main all
 ```
 
