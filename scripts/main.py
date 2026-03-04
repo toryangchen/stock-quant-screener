@@ -7,8 +7,8 @@ import sys
 from importlib import import_module
 from pathlib import Path
 
-from src.config import AppConfig, load_config
-from src.output.logger import setup_logger
+from scripts.config import AppConfig, load_config
+from scripts.output.logger import setup_logger
 
 
 def _get_hs300_ret20(ds, logger: logging.Logger) -> float | None:
@@ -141,8 +141,8 @@ def apply_overrides(cfg: AppConfig, args: argparse.Namespace) -> AppConfig:
 
 
 def run_etf_module(ds, cfg: AppConfig, logger: logging.Logger) -> None:
-    run_etf_rotation = import_module("src.logic.etf_rotation").run_etf_rotation
-    writer = import_module("src.output.writer")
+    run_etf_rotation = import_module("scripts.logic.etf_rotation").run_etf_rotation
+    writer = import_module("scripts.output.writer")
     etf_df, decision = run_etf_rotation(ds=ds, cfg=cfg, logger=logger)
     writer.write_dataframe(
         etf_df,
@@ -159,10 +159,10 @@ def run_breakout_module(
     logger: logging.Logger,
     pause_note: str = "",
 ):
-    filter_stock_pool = import_module("src.logic.filters").filter_stock_pool
-    run_trend_breakout = import_module("src.logic.trend_breakout").run_trend_breakout
-    writer = import_module("src.output.writer")
-    history_store = import_module("src.output.mongo_history").MongoScreeningHistory()
+    filter_stock_pool = import_module("scripts.logic.filters").filter_stock_pool
+    run_trend_breakout = import_module("scripts.logic.trend_breakout").run_trend_breakout
+    writer = import_module("scripts.output.writer")
+    history_store = import_module("scripts.output.mongo_history").MongoScreeningHistory()
     try:
         # 默认关闭筛选内自动同步，采集与筛选分离。
         auto_sync = os.getenv("BREAKOUT_AUTO_SYNC", "false").lower() in {"1", "true", "yes", "on"}
@@ -283,7 +283,7 @@ def run_sync_module(ds, logger: logging.Logger) -> None:
 
 
 def run_ingest_module(logger: logging.Logger) -> None:
-    ingest = import_module("src.jobs.daily_market_ingest")
+    ingest = import_module("scripts.jobs.daily_market_ingest")
     result = ingest.run_daily_market_ingest(logger=logger)
     logger.info(
         "数据采集完成: trade_date=%s, list=%s, daily=%s, mktcap_filled=%s, mongo_upserts=%s, snapshot=%s",
@@ -297,9 +297,9 @@ def run_ingest_module(logger: logging.Logger) -> None:
 
 
 def run_all(ds, cfg: AppConfig, logger: logging.Logger) -> None:
-    performance = import_module("src.logic.performance")
-    equity_curve = import_module("src.logic.equity_curve")
-    writer = import_module("src.output.writer")
+    performance = import_module("scripts.logic.performance")
+    equity_curve = import_module("scripts.logic.equity_curve")
+    writer = import_module("scripts.output.writer")
 
     run_etf_module(ds, cfg, logger)
     candidates = run_breakout_module(ds, cfg, logger, pause_note="")
@@ -342,7 +342,7 @@ def main() -> int:
 
     try:
         cfg = apply_overrides(load_config(), args)
-        import_module("src.output.writer").ensure_output_dir(cfg.output_dir)
+        import_module("scripts.output.writer").ensure_output_dir(cfg.output_dir)
     except Exception as exc:
         logger.error("配置或输出目录初始化失败: %s", exc)
         return 1
@@ -359,14 +359,14 @@ def main() -> int:
         ts_token = os.getenv("TUSHARE_TOKEN", "").strip()
         if ts_token:
             try:
-                ds = import_module("src.data_source.tushare_impl").TushareDataSource(token=ts_token)
+                ds = import_module("scripts.data_source.tushare_impl").TushareDataSource(token=ts_token)
                 logger.info("DataSource 使用 Tushare(日线) + AkShare(ETF备用)")
             except Exception as exc:
                 logger.warning("Tushare 初始化失败，回退 AkShare: %s", exc)
-                ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
+                ds = import_module("scripts.data_source.akshare_impl").AkShareDataSource()
                 logger.info("DataSource 使用 AkShare")
         else:
-            ds = import_module("src.data_source.akshare_impl").AkShareDataSource()
+            ds = import_module("scripts.data_source.akshare_impl").AkShareDataSource()
             logger.info("未检测到 TUSHARE_TOKEN，DataSource 使用 AkShare")
     except Exception as exc:
         logger.error("DataSource 初始化失败: %s", exc)

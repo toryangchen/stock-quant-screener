@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.config import AppConfig
+from scripts.config import AppConfig
 
 
 def filter_stock_pool(spot_df: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:

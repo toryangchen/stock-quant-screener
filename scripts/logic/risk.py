@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from src.config import AppConfig
+from scripts.config import AppConfig
 
 
 @dataclass

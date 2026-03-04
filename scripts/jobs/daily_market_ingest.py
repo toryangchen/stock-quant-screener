@@ -23,6 +23,54 @@ class IngestResult:
     snapshot_file: str
 
 
+class MongoProgressLogger:
+    def __init__(self) -> None:
+        self.enabled = False
+        self._coll = None
+        try:
+            uri = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017").strip()
+            db_name = os.getenv("MONGO_DB", "quant_screener").strip() or "quant_screener"
+            coll_name = os.getenv("MONGO_LOG_COLLECTION", "log").strip() or "log"
+            client = MongoClient(uri, serverSelectionTimeoutMS=2000)
+            client.admin.command("ping")
+            self._coll = client[db_name][coll_name]
+            self.enabled = True
+        except Exception:
+            self.enabled = False
+            self._coll = None
+
+    def write(
+        self,
+        *,
+        run_id: str,
+        trade_date: str,
+        stage: str,
+        processed: int,
+        total: int,
+        mktcap_count: int,
+        turnover_rate_count: int,
+        message: str,
+    ) -> None:
+        if not self.enabled or self._coll is None:
+            return
+        try:
+            self._coll.insert_one(
+                {
+                    "run_id": run_id,
+                    "trade_date": trade_date,
+                    "stage": stage,
+                    "processed": int(processed),
+                    "total": int(total),
+                    "mktcap_count": int(mktcap_count),
+                    "turnover_rate_count": int(turnover_rate_count),
+                    "message": message,
+                    "created_at": datetime.utcnow(),
+                }
+            )
+        except Exception:
+            pass
+
+
 def _load_env_file(env_path: Path = Path(".env")) -> None:
     if not env_path.exists():
         return
@@ -143,7 +191,13 @@ def fetch_daily_core(trade_date: str, logger: logging.Logger) -> tuple[pd.DataFr
         return _fetch_daily_akshare(logger=logger), "akshare"
 
 
-def fetch_akshare_enrichment_per_stock(codes: list[str], logger: logging.Logger) -> dict[str, dict]:
+def fetch_akshare_enrichment_per_stock(
+    codes: list[str],
+    logger: logging.Logger,
+    progress_logger: MongoProgressLogger | None = None,
+    run_id: str = "",
+    trade_date: str = "",
+) -> dict[str, dict]:
     import akshare as ak  # type: ignore
 
     sleep_sec = float(os.getenv("AK_ENRICH_SLEEP_SECONDS", "0.25"))
@@ -202,13 +256,19 @@ def fetch_akshare_enrichment_per_stock(codes: list[str], logger: logging.Logger)
         if idx % 200 == 0:
             got_m = sum(1 for v in result.values() if v.get("mktcap") is not None)
             got_t = sum(1 for v in result.values() if v.get("turnover_rate") is not None)
-            logger.info(
-                "AkShare 逐只补充进度: %s/%s, mktcap=%s, turnover_rate=%s",
-                idx,
-                len(codes),
-                got_m,
-                got_t,
-            )
+            msg = f"AkShare 逐只补充进度: {idx}/{len(codes)}, mktcap={got_m}, turnover_rate={got_t}"
+            logger.info(msg)
+            if progress_logger is not None:
+                progress_logger.write(
+                    run_id=run_id,
+                    trade_date=trade_date,
+                    stage="akshare_enrichment",
+                    processed=idx,
+                    total=len(codes),
+                    mktcap_count=got_m,
+                    turnover_rate_count=got_t,
+                    message=msg,
+                )
         if sleep_sec > 0:
             time.sleep(sleep_sec)
 
@@ -313,13 +373,31 @@ def upload_snapshot_to_mongo(df: pd.DataFrame, trade_date: str, source_tag: str,
 def run_daily_market_ingest(logger: logging.Logger) -> IngestResult:
     _load_env_file(Path(".env"))
     trade_date = datetime.now().strftime("%Y%m%d")
+    run_id = f"ingest_{trade_date}_{datetime.now().strftime('%H%M%S')}"
+    progress_logger = MongoProgressLogger()
 
     daily_df, daily_source = fetch_daily_core(trade_date=trade_date, logger=logger)
     merged = daily_df.dropna(subset=["close", "volume", "low"]).reset_index(drop=True)
     logger.info("当日全量股票池(来自日线): %s", len(merged))
+    progress_logger.write(
+        run_id=run_id,
+        trade_date=trade_date,
+        stage="start",
+        processed=0,
+        total=len(merged),
+        mktcap_count=0,
+        turnover_rate_count=0,
+        message=f"ingest start, total={len(merged)}",
+    )
 
     # 逐只补充 AkShare 字段：mktcap + turnover_rate
-    enrich_map = fetch_akshare_enrichment_per_stock(merged["code"].astype(str).tolist(), logger=logger)
+    enrich_map = fetch_akshare_enrichment_per_stock(
+        merged["code"].astype(str).tolist(),
+        logger=logger,
+        progress_logger=progress_logger,
+        run_id=run_id,
+        trade_date=trade_date,
+    )
     merged["mktcap"] = merged["code"].map(lambda c: (enrich_map.get(str(c)) or {}).get("mktcap"))
     merged["turnover_rate"] = merged.apply(
         lambda r: (enrich_map.get(str(r["code"])) or {}).get("turnover_rate")
@@ -335,6 +413,16 @@ def run_daily_market_ingest(logger: logging.Logger) -> IngestResult:
         trade_date=trade_date,
         source_tag=f"daily_ingest:{daily_source}+ak_scale",
         logger=logger,
+    )
+    progress_logger.write(
+        run_id=run_id,
+        trade_date=trade_date,
+        stage="done",
+        processed=len(merged),
+        total=len(merged),
+        mktcap_count=mkt_filled,
+        turnover_rate_count=int(pd.to_numeric(merged["turnover_rate"], errors="coerce").notna().sum()),
+        message=f"ingest done, upserts={mongo_upserts}",
     )
 
     return IngestResult(

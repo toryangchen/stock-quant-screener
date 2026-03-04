@@ -6,9 +6,9 @@ import time
 
 import pandas as pd
 
-from src.config import AppConfig
-from src.data_source.base import DataSource
-from src.logic.risk import calc_position_size
+from scripts.config import AppConfig
+from scripts.data_source.base import DataSource
+from scripts.logic.risk import calc_position_size
 
 
 def _format_scan_code(code: str) -> str:

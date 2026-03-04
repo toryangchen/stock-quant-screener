@@ -4,8 +4,8 @@ import logging
 
 import pandas as pd
 
-from src.config import AppConfig
-from src.data_source.base import DataSource
+from scripts.config import AppConfig
+from scripts.data_source.base import DataSource
 
 
 def run_etf_rotation(ds: DataSource, cfg: AppConfig, logger: logging.Logger) -> tuple[pd.DataFrame, str]:

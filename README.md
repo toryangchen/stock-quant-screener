@@ -23,8 +23,8 @@ cp .env.example .env
 
 ## 数据采集与筛选分离
 
-- 数据采集：`python -m src.main ingest`
-- 股票筛选：`python -m src.main breakout`
+- 数据采集：`python -m scripts.main ingest`
+- 股票筛选：`python -m scripts.main breakout`
 
 `ingest` 流程：
 
@@ -44,16 +44,16 @@ cp .env.example .env
 ## 运行
 
 ```bash
-python -m src.main etf
-python -m src.main breakout
-python -m src.main ingest
-python -m src.main all
+python -m scripts.main etf
+python -m scripts.main breakout
+python -m scripts.main ingest
+python -m scripts.main all
 ```
 
 可选参数：
 
 ```bash
-python -m src.main all --output-dir ./outputs --scan-limit 300 --risk-per-trade 0.02 --sleep 0.1
+python -m scripts.main all --output-dir ./outputs --scan-limit 300 --risk-per-trade 0.02 --sleep 0.1
 ```
 
 ## 输出文件
