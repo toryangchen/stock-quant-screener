@@ -12,6 +12,8 @@ venv/
 outputs/
 .env
 .env.local
+node_modules/
+dist/
 
 # IDE
 .vscode/

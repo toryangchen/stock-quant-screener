@@ -34,6 +34,13 @@ cp .env.example .env
 
 说明：`breakout` 默认不自动在线同步（`BREAKOUT_AUTO_SYNC=false`），只使用数据库/缓存数据；如需恢复旧行为可设为 `true`。
 
+## 可视化跟踪页面（新增）
+
+- 前端：`apps/web`（React + TypeScript）
+- 后端：`apps/api`（Python FastAPI，当前为 mock 接口）
+
+启动方式见 [`apps/README.md`](/Users/yang/Documents/stock-quant-screener/apps/README.md)。
+
 ## 运行
 
 ```bash
