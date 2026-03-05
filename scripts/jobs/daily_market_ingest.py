@@ -70,7 +70,7 @@ def _infer_exchange(code6: str) -> str:
     return "SZ"
 
 
-def _build_doc_id(code6: str, exchange: str | None = None) -> str:
+def _build_doc_id(code6: str) -> str:
     return _norm_code(code6)
 
 
@@ -158,13 +158,12 @@ def _fetch_daily_akshare(logger: logging.Logger) -> pd.DataFrame:
     return out
 
 
-def fetch_daily_core(trade_date: str, logger: logging.Logger) -> tuple[pd.DataFrame, str]:
+def fetch_daily_core(trade_date: str, logger: logging.Logger) -> pd.DataFrame:
     try:
-        df = _fetch_daily_tushare(trade_date=trade_date, logger=logger)
-        return df, "tushare"
+        return _fetch_daily_tushare(trade_date=trade_date, logger=logger)
     except Exception as exc:
         logger.warning("Tushare 拉取失败，回退 AkShare: %s", exc)
-        return _fetch_daily_akshare(logger=logger), "akshare"
+        return _fetch_daily_akshare(logger=logger)
 
 
 def write_local_snapshot(df: pd.DataFrame, trade_date: str, logger: logging.Logger) -> Path:
@@ -215,7 +214,7 @@ def _merge_history(existing_data: list[dict] | None, new_row: dict) -> list[dict
     return rows[-60:]
 
 
-def upload_snapshot_to_mongo(df: pd.DataFrame, trade_date: str, source_tag: str, logger: logging.Logger) -> int:
+def upload_snapshot_to_mongo(df: pd.DataFrame, logger: logging.Logger) -> int:
     uri = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017").strip()
     db_name = os.getenv("MONGO_DB", "quant_screener").strip() or "quant_screener"
     coll_name = os.getenv("MONGO_COLLECTION", "market_cache").strip() or "market_cache"
@@ -241,7 +240,7 @@ def upload_snapshot_to_mongo(df: pd.DataFrame, trade_date: str, source_tag: str,
         code = _norm_code(str(r["code"]))
         old = existing_by_code.get(code, {})
         exchange = str(r.get("exchange") or old.get("exchange") or _infer_exchange(code)).upper()
-        doc_id = _build_doc_id(code, exchange)
+        doc_id = _build_doc_id(code)
         daily_row = {
             "date": str(r["date"]),
             "close": None if pd.isna(r["close"]) else float(r["close"]),
@@ -290,18 +289,13 @@ def run_daily_ingest_step1(logger: logging.Logger, trade_date: str | None = None
         except Exception:
             pass
 
-    daily_df, daily_source = fetch_daily_core(trade_date=trade_date, logger=logger)
+    daily_df = fetch_daily_core(trade_date=trade_date, logger=logger)
     merged = daily_df.dropna(subset=["close", "volume", "low"]).reset_index(drop=True)
     merged["mktcap"] = pd.NA
     logger.info("当日全量股票池(来自日线): %s", len(merged))
 
     snapshot_file = write_local_snapshot(merged, trade_date=trade_date, logger=logger)
-    mongo_upserts = upload_snapshot_to_mongo(
-        merged,
-        trade_date=trade_date,
-        source_tag=f"daily_ingest_step1:{daily_source}",
-        logger=logger,
-    )
+    mongo_upserts = upload_snapshot_to_mongo(merged, logger=logger)
     return IngestResult(
         trade_date=trade_date,
         stock_list_count=int(len(merged)),
@@ -352,19 +346,18 @@ def run_mktcap_enrich_step2(logger: logging.Logger, trade_date: str | None = Non
 
         em_symbol = _to_em_symbol(code)
         mktcap = None
-        if not em_symbol.startswith("BJ"):
-            for _ in range(max_retries + 1):
-                try:
-                    scale_df = ak.stock_zh_scale_comparison_em(symbol=em_symbol)
-                    if scale_df is not None and not scale_df.empty and {"代码", "总市值"}.issubset(scale_df.columns):
-                        hit = scale_df[scale_df["代码"].astype(str).str.zfill(6) == code]
-                        if not hit.empty:
-                            mv = pd.to_numeric(hit.iloc[0]["总市值"], errors="coerce")
-                            if pd.notna(mv):
-                                mktcap = float(mv)
-                    break
-                except Exception:
-                    time.sleep(0.2)
+        for _ in range(max_retries + 1):
+            try:
+                scale_df = ak.stock_zh_scale_comparison_em(symbol=em_symbol)
+                if scale_df is not None and not scale_df.empty and {"代码", "总市值"}.issubset(scale_df.columns):
+                    hit = scale_df[scale_df["代码"].astype(str).str.zfill(6) == code]
+                    if not hit.empty:
+                        mv = pd.to_numeric(hit.iloc[0]["总市值"], errors="coerce")
+                        if pd.notna(mv):
+                            mktcap = float(mv)
+                break
+            except Exception:
+                time.sleep(0.2)
 
         # 每拉一只都落本地（用户要求）
         if row_idx is not None:
@@ -379,12 +372,7 @@ def run_mktcap_enrich_step2(logger: logging.Logger, trade_date: str | None = Non
     # 统一落库
     df2 = pd.DataFrame(payload.get("data", []))
     mkt_filled = int(pd.to_numeric(df2.get("mktcap"), errors="coerce").notna().sum())
-    mongo_upserts = upload_snapshot_to_mongo(
-        df2,
-        trade_date=trade_date,
-        source_tag="daily_ingest_step2:ak_scale_local_then_db",
-        logger=logger,
-    )
+    mongo_upserts = upload_snapshot_to_mongo(df2, logger=logger)
 
     return IngestResult(
         trade_date=trade_date,
