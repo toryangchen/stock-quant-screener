@@ -325,6 +325,12 @@ def run_ingest_mktcap_module(logger: logging.Logger, trade_date: str | None = No
     )
 
 
+def build_mongo_breakout_ds(logger: logging.Logger):
+    ds = import_module("scripts.data_source.mongo_only").MongoOnlyDataSource()
+    logger.info("Breakout DataSource 使用 MongoOnly(market_cache)")
+    return ds
+
+
 def run_all(ds, cfg: AppConfig, logger: logging.Logger) -> None:
     performance = import_module("scripts.logic.performance")
     equity_curve = import_module("scripts.logic.equity_curve")
@@ -379,6 +385,8 @@ def main() -> int:
     if args.command == "ingest":
         try:
             run_ingest_module(logger)
+            ds = build_mongo_breakout_ds(logger)
+            run_breakout_module(ds, cfg, logger, pause_note="")
             return 0
         except Exception as exc:
             logger.error("执行失败: %s", exc)
@@ -398,18 +406,21 @@ def main() -> int:
             logger.error("执行失败: %s", exc)
             return 3
     try:
-        ts_token = os.getenv("TUSHARE_TOKEN", "").strip()
-        if ts_token:
-            try:
-                ds = import_module("scripts.data_source.tushare_impl").TushareDataSource(token=ts_token)
-                logger.info("DataSource 使用 Tushare(日线) + AkShare(ETF备用)")
-            except Exception as exc:
-                logger.warning("Tushare 初始化失败，回退 AkShare: %s", exc)
-                ds = import_module("scripts.data_source.akshare_impl").AkShareDataSource()
-                logger.info("DataSource 使用 AkShare")
+        if args.command == "breakout":
+            ds = build_mongo_breakout_ds(logger)
         else:
-            ds = import_module("scripts.data_source.akshare_impl").AkShareDataSource()
-            logger.info("未检测到 TUSHARE_TOKEN，DataSource 使用 AkShare")
+            ts_token = os.getenv("TUSHARE_TOKEN", "").strip()
+            if ts_token:
+                try:
+                    ds = import_module("scripts.data_source.tushare_impl").TushareDataSource(token=ts_token)
+                    logger.info("DataSource 使用 Tushare(日线) + AkShare(ETF备用)")
+                except Exception as exc:
+                    logger.warning("Tushare 初始化失败，回退 AkShare: %s", exc)
+                    ds = import_module("scripts.data_source.akshare_impl").AkShareDataSource()
+                    logger.info("DataSource 使用 AkShare")
+            else:
+                ds = import_module("scripts.data_source.akshare_impl").AkShareDataSource()
+                logger.info("未检测到 TUSHARE_TOKEN，DataSource 使用 AkShare")
     except Exception as exc:
         logger.error("DataSource 初始化失败: %s", exc)
         return 2
@@ -421,8 +432,6 @@ def main() -> int:
             run_breakout_module(ds, cfg, logger, pause_note="")
         elif args.command == "sync":
             run_sync_module(ds, logger)
-        elif args.command == "ingest":
-            run_ingest_module(logger)
         else:
             run_all(ds, cfg, logger)
         return 0

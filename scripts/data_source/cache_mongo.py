@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta
+import re
+from datetime import datetime
 
 import pandas as pd
 
@@ -11,7 +12,6 @@ class MongoDataCache:
     def __init__(self) -> None:
         self.logger = logging.getLogger("quant_screener")
         self.enabled = os.getenv("MONGO_CACHE_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-        self.ttl_seconds = int(os.getenv("MONGO_CACHE_TTL_SECONDS", "43200"))
         self._coll = None
 
         if not self.enabled:
@@ -28,7 +28,6 @@ class MongoDataCache:
             client.admin.command("ping")
             db = client[db_name]
             self._coll = db[coll_name]
-            self._coll.create_index("expires_at")
         except Exception as exc:
             self.enabled = False
             self._coll = None
@@ -37,17 +36,18 @@ class MongoDataCache:
     def _is_ready(self) -> bool:
         return self.enabled and self._coll is not None
 
+    @staticmethod
+    def _is_stock_key(key: str) -> bool:
+        return bool(re.fullmatch(r"\d{6}", str(key).strip()))
+
     def get_df(self, key: str) -> pd.DataFrame | None:
         if not self._is_ready():
             return None
-
-        now = datetime.utcnow()
-        doc = self._coll.find_one({"_id": key})
-        if not doc:
+        if not self._is_stock_key(key):
             return None
 
-        expires_at = doc.get("expires_at")
-        if expires_at and expires_at < now:
+        doc = self._coll.find_one({"_id": key})
+        if not doc:
             return None
 
         data = doc.get("data")
@@ -68,9 +68,11 @@ class MongoDataCache:
     ) -> None:
         if not self._is_ready() or df.empty:
             return
+        if not self._is_stock_key(key):
+            # market_cache 仅允许股票代码 _id
+            return
 
         now = datetime.utcnow()
-        expires_at = now + timedelta(seconds=self.ttl_seconds)
 
         out = df.copy()
         if tail_rows is not None and tail_rows > 0:
@@ -81,15 +83,14 @@ class MongoDataCache:
 
         payload = {
             "_id": key,
-            "cached_at": now,
-            "expires_at": expires_at,
+            "updated_at": now,
             "data": out.to_dict(orient="records"),
         }
         # 保留历史文档中的额外顶层字段（例如 mktcap）
         old = self._coll.find_one({"_id": key})
         if old:
             for k, v in old.items():
-                if k not in {"_id", "cached_at", "expires_at", "data"}:
+                if k not in {"_id", "updated_at", "data"}:
                     payload[k] = v
         if meta:
             for k, v in meta.items():

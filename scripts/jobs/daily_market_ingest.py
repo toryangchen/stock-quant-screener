@@ -43,13 +43,35 @@ def _norm_code(code: str) -> str:
     return m.group(1) if m else s
 
 
+def _is_bj_code(code6: str, exchange: str | None = None) -> bool:
+    ex = (exchange or "").strip().upper()
+    if ex == "BJ":
+        return True
+    d = _norm_code(code6)
+    # 北交所常见代码段：4/8/92 开头（例如 920xxx）
+    return d.startswith(("4", "8", "92"))
+
+
 def _to_em_symbol(code6: str) -> str:
     d = _norm_code(code6)
+    if _is_bj_code(d):
+        return f"BJ{d}"
     if d.startswith(("6", "5", "9")):
         return f"SH{d}"
-    if d.startswith("8"):
-        return f"BJ{d}"
     return f"SZ{d}"
+
+
+def _infer_exchange(code6: str) -> str:
+    d = _norm_code(code6)
+    if _is_bj_code(d):
+        return "BJ"
+    if d.startswith(("6", "5", "9")):
+        return "SH"
+    return "SZ"
+
+
+def _build_doc_id(code6: str, exchange: str | None = None) -> str:
+    return _norm_code(code6)
 
 
 def _fetch_daily_tushare(trade_date: str, logger: logging.Logger) -> pd.DataFrame:
@@ -73,6 +95,9 @@ def _fetch_daily_tushare(trade_date: str, logger: logging.Logger) -> pd.DataFram
 
     daily = daily[need_daily].copy()
     daily["code"] = daily["ts_code"].astype(str).str.split(".").str[0].map(_norm_code)
+    daily["exchange"] = (
+        daily["ts_code"].astype(str).str.split(".").str[1].str.upper().fillna("").replace("", pd.NA)
+    )
     daily = daily.rename(columns={"vol": "volume", "amount": "turnover"})
 
     # 不使用 daily_basic（当前权限不可用）。
@@ -89,6 +114,7 @@ def _fetch_daily_tushare(trade_date: str, logger: logging.Logger) -> pd.DataFram
         [
             "code",
             "date",
+            "exchange",
             "close",
             "volume",
             "low",
@@ -118,6 +144,7 @@ def _fetch_daily_akshare(logger: logging.Logger) -> pd.DataFrame:
         {
             "code": df["代码"].astype(str).map(_norm_code),
             "date": today,
+            "exchange": df["代码"].astype(str).map(_infer_exchange),
             "close": pd.to_numeric(df["最新价"], errors="coerce"),
             "volume": pd.to_numeric(df["成交量"], errors="coerce"),
             "low": pd.to_numeric(df["最低"], errors="coerce"),
@@ -195,18 +222,26 @@ def upload_snapshot_to_mongo(df: pd.DataFrame, trade_date: str, source_tag: str,
 
     coll = MongoClient(uri)[db_name][coll_name]
 
-    codes = df["code"].astype(str).tolist()
-    existed = {
-        doc["_id"]: doc
-        for doc in coll.find({"_id": {"$in": codes}}, {"_id": 1, "data": 1, "name": 1, "exchange": 1, "mktcap": 1})
-    }
+    existing_by_code: dict[str, dict] = {}
+    for doc in coll.find(
+        {"_id": {"$regex": r"^\d{6}$"}},
+        {"_id": 1, "data": 1, "name": 1, "exchange": 1, "mktcap": 1},
+    ):
+        code6 = _norm_code(str(doc.get("_id", "")))
+        prev = existing_by_code.get(code6)
+        prev_len = len(prev.get("data", [])) if isinstance(prev, dict) else -1
+        curr_len = len(doc.get("data", [])) if isinstance(doc.get("data"), list) else 0
+        if prev is None or curr_len > prev_len:
+            existing_by_code[code6] = doc
 
     ops: list[UpdateOne] = []
     now = datetime.utcnow()
 
     for _, r in df.iterrows():
         code = _norm_code(str(r["code"]))
-        old = existed.get(code, {})
+        old = existing_by_code.get(code, {})
+        exchange = str(r.get("exchange") or old.get("exchange") or _infer_exchange(code)).upper()
+        doc_id = _build_doc_id(code, exchange)
         daily_row = {
             "date": str(r["date"]),
             "close": None if pd.isna(r["close"]) else float(r["close"]),
@@ -219,37 +254,14 @@ def upload_snapshot_to_mongo(df: pd.DataFrame, trade_date: str, source_tag: str,
         merged_data = _merge_history(old.get("data", []), daily_row)
 
         payload = {
-            "_id": code,
-            "source": source_tag,
+            "_id": doc_id,
             "updated_at": now,
-            "cached_at": now,
-            "expires_at": None,
             "name": str(r.get("name") or old.get("name") or ""),
-            "exchange": str(r.get("exchange") or old.get("exchange") or ""),
+            "exchange": str(exchange or old.get("exchange") or ""),
             "mktcap": None if pd.isna(r.get("mktcap")) else float(r.get("mktcap")),
             "data": merged_data,
         }
-        ops.append(UpdateOne({"_id": code}, {"$set": payload}, upsert=True))
-
-    # 快照和同步元信息
-    snap_doc = {
-        "_id": f"ingest:daily_snapshot:{trade_date}",
-        "source": source_tag,
-        "updated_at": now,
-        "cached_at": now,
-        "expires_at": None,
-        "data": df.to_dict(orient="records"),
-    }
-    meta_doc = {
-        "_id": "ingest:sync_meta",
-        "source": source_tag,
-        "updated_at": now,
-        "cached_at": now,
-        "expires_at": None,
-        "data": [{"sync_date": trade_date, "total": int(len(df)), "ok": int(len(df)), "failed": 0}],
-    }
-    ops.append(UpdateOne({"_id": snap_doc["_id"]}, {"$set": snap_doc}, upsert=True))
-    ops.append(UpdateOne({"_id": meta_doc["_id"]}, {"$set": meta_doc}, upsert=True))
+        ops.append(UpdateOne({"_id": doc_id}, {"$set": payload}, upsert=True))
 
     if ops:
         coll.bulk_write(ops, ordered=False)
@@ -322,6 +334,22 @@ def run_mktcap_enrich_step2(logger: logging.Logger, trade_date: str | None = Non
 
     code_idx = {str(_norm_code(c)): i for i, c in enumerate(df["code"].astype(str).tolist())}
     for idx, code in enumerate(codes, start=1):
+        row_idx = code_idx.get(code)
+        row_exchange = None
+        if row_idx is not None and "exchange" in df.columns:
+            row_exchange = str(df.iloc[row_idx].get("exchange") or "").upper()
+
+        if _is_bj_code(code, row_exchange):
+            # 北交所跳过 mktcap 获取（用户要求）
+            if row_idx is not None:
+                payload["data"][row_idx]["mktcap"] = None
+                _write_json_atomic(path, payload)
+            if idx % 200 == 0:
+                logger.info("step2 进度: %s/%s", idx, len(codes))
+            if sleep_sec > 0:
+                time.sleep(sleep_sec)
+            continue
+
         em_symbol = _to_em_symbol(code)
         mktcap = None
         if not em_symbol.startswith("BJ"):
@@ -339,7 +367,6 @@ def run_mktcap_enrich_step2(logger: logging.Logger, trade_date: str | None = Non
                     time.sleep(0.2)
 
         # 每拉一只都落本地（用户要求）
-        row_idx = code_idx.get(code)
         if row_idx is not None:
             payload["data"][row_idx]["mktcap"] = mktcap
             _write_json_atomic(path, payload)

@@ -27,7 +27,7 @@ class MongoScreeningHistory:
             client.admin.command("ping")
             db = client[db_name]
             self._coll = db[coll_name]
-            self._coll.create_index([("run_date", 1), ("code", 1)], unique=True)
+            self._coll.create_index([("code", 1), ("run_date", 1)], unique=True)
             self._coll.create_index("saved_at")
         except Exception as exc:
             self.enabled = False
@@ -48,13 +48,15 @@ class MongoScreeningHistory:
                 return v
         return v
 
+    @staticmethod
+    def _build_doc_id(code: str, run_date: str) -> str:
+        return f"{str(code).strip()}.{str(run_date).strip()}"
+
     def save_daily(self, run_date: str, primary_df: pd.DataFrame, secondary_df: pd.DataFrame) -> tuple[int, int]:
         if not self._is_ready():
             return 0, 0
 
         now = datetime.utcnow()
-        # 保证同一天幂等覆盖，仅保留单条(run_date + code)
-        self._coll.delete_many({"run_date": run_date})
         if primary_df is None or primary_df.empty:
             return 0, 0
 
@@ -72,7 +74,7 @@ class MongoScreeningHistory:
                     continue
                 secondary_extra[code] = {k: self._normalize_value(v) for k, v in row.items() if k != "code"}
 
-        records: list[dict] = []
+        ops: list[UpdateOne] = []
         for row in primary_df.to_dict(orient="records"):
             code = str(row.get("code", "")).strip()
             if not code:
@@ -80,6 +82,7 @@ class MongoScreeningHistory:
             payload = {k: self._normalize_value(v) for k, v in row.items()}
             payload.update(
                 {
+                    "_id": self._build_doc_id(code=code, run_date=run_date),
                     "run_date": run_date,
                     "code": code,
                     "is_secondary": code in secondary_codes,
@@ -88,13 +91,19 @@ class MongoScreeningHistory:
             )
             if code in secondary_extra:
                 payload.update(secondary_extra[code])
-            records.append(payload)
+            ops.append(
+                UpdateOne(
+                    {"_id": payload["_id"]},
+                    {"$set": payload},
+                    upsert=True,
+                )
+            )
 
-        if not records:
+        if not ops:
             return 0, 0
 
-        self._coll.insert_many(records, ordered=False)
-        return len(records), len(secondary_codes)
+        self._coll.bulk_write(ops, ordered=False)
+        return len(ops), len(secondary_codes)
 
     def mark_secondary(self, run_date: str, secondary_df: pd.DataFrame) -> int:
         """兼容增量场景：将已存在的 run_date 记录标记为二筛命中。"""
