@@ -120,12 +120,15 @@ def load_env_file(env_path: Path = Path(".env")) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="A-share quant screener demo")
-    parser.add_argument("command", choices=["etf", "breakout", "sync", "ingest", "retry-mktcap", "all"])
+    parser.add_argument(
+        "command",
+        choices=["etf", "breakout", "sync", "ingest", "ingest-daily", "ingest-mktcap", "all"],
+    )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--scan-limit", type=int, default=None)
     parser.add_argument("--risk-per-trade", type=float, default=None)
     parser.add_argument("--sleep", type=float, default=None)
-    parser.add_argument("--trade-date", default=None, help="YYYYMMDD, for retry-mktcap")
+    parser.add_argument("--trade-date", default=None, help="YYYYMMDD, for ingest-mktcap")
     return parser.parse_args()
 
 
@@ -297,14 +300,28 @@ def run_ingest_module(logger: logging.Logger) -> None:
     )
 
 
-def run_retry_mktcap_module(logger: logging.Logger, trade_date: str | None = None) -> None:
+def run_ingest_daily_module(logger: logging.Logger) -> None:
     ingest = import_module("scripts.jobs.daily_market_ingest")
-    stats = ingest.retry_failed_mktcap(logger=logger, trade_date=trade_date)
+    result = ingest.run_daily_ingest_step1(logger=logger)
     logger.info(
-        "mktcap 失败重试完成: total=%s, success=%s, failed=%s",
-        stats.get("total", 0),
-        stats.get("success", 0),
-        stats.get("failed", 0),
+        "数据采集 step1 完成: trade_date=%s, list=%s, daily=%s, mongo_upserts=%s, snapshot=%s",
+        result.trade_date,
+        result.stock_list_count,
+        result.daily_rows,
+        result.mongo_upserts,
+        result.snapshot_file,
+    )
+
+
+def run_ingest_mktcap_module(logger: logging.Logger, trade_date: str | None = None) -> None:
+    ingest = import_module("scripts.jobs.daily_market_ingest")
+    result = ingest.run_mktcap_enrich_step2(logger=logger, trade_date=trade_date)
+    logger.info(
+        "数据采集 step2 完成: trade_date=%s, mktcap_filled=%s, mongo_upserts=%s, snapshot=%s",
+        result.trade_date,
+        result.mktcap_filled,
+        result.mongo_upserts,
+        result.snapshot_file,
     )
 
 
@@ -366,14 +383,20 @@ def main() -> int:
         except Exception as exc:
             logger.error("执行失败: %s", exc)
             return 3
-    if args.command == "retry-mktcap":
+    if args.command == "ingest-daily":
         try:
-            run_retry_mktcap_module(logger, trade_date=args.trade_date)
+            run_ingest_daily_module(logger)
             return 0
         except Exception as exc:
             logger.error("执行失败: %s", exc)
             return 3
-
+    if args.command == "ingest-mktcap":
+        try:
+            run_ingest_mktcap_module(logger, trade_date=args.trade_date)
+            return 0
+        except Exception as exc:
+            logger.error("执行失败: %s", exc)
+            return 3
     try:
         ts_token = os.getenv("TUSHARE_TOKEN", "").strip()
         if ts_token:

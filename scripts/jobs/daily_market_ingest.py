@@ -23,62 +23,6 @@ class IngestResult:
     snapshot_file: str
 
 
-class MongoProgressLogger:
-    def __init__(self) -> None:
-        self.enabled = False
-        self._coll = None
-        try:
-            uri = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017").strip()
-            db_name = os.getenv("MONGO_DB", "quant_screener").strip() or "quant_screener"
-            coll_name = os.getenv("MONGO_LOG_COLLECTION", "log").strip() or "log"
-            client = MongoClient(uri, serverSelectionTimeoutMS=2000)
-            client.admin.command("ping")
-            self._coll = client[db_name][coll_name]
-            self.enabled = True
-        except Exception:
-            self.enabled = False
-            self._coll = None
-
-    def write(
-        self,
-        *,
-        run_id: str,
-        trade_date: str,
-        stage: str,
-        processed: int,
-        total: int,
-        mktcap_count: int,
-        turnover_rate_count: int,
-        message: str,
-    ) -> None:
-        if not self.enabled or self._coll is None:
-            return
-        try:
-            self._coll.insert_one(
-                {
-                    "run_id": run_id,
-                    "trade_date": trade_date,
-                    "stage": stage,
-                    "processed": int(processed),
-                    "total": int(total),
-                    "mktcap_count": int(mktcap_count),
-                    "turnover_rate_count": int(turnover_rate_count),
-                    "message": message,
-                    "created_at": datetime.utcnow(),
-                }
-            )
-        except Exception:
-            pass
-
-    def write_many(self, docs: list[dict]) -> None:
-        if not self.enabled or self._coll is None or not docs:
-            return
-        try:
-            self._coll.insert_many(docs, ordered=False)
-        except Exception:
-            pass
-
-
 def _load_env_file(env_path: Path = Path(".env")) -> None:
     if not env_path.exists():
         return
@@ -131,12 +75,11 @@ def _fetch_daily_tushare(trade_date: str, logger: logging.Logger) -> pd.DataFram
     daily["code"] = daily["ts_code"].astype(str).str.split(".").str[0].map(_norm_code)
     daily = daily.rename(columns={"vol": "volume", "amount": "turnover"})
 
-    # 不使用 daily_basic（当前权限不可用），turnover_rate 后续由 AkShare 逐只补充。
+    # 不使用 daily_basic（当前权限不可用）。
     out = daily.copy()
-    out["turnover_rate"] = pd.NA
     out["date"] = pd.to_datetime(out["trade_date"], format="%Y%m%d", errors="coerce").dt.strftime("%Y-%m-%d")
 
-    numeric_cols = ["close", "volume", "low", "pre_close", "open", "turnover", "turnover_rate"]
+    numeric_cols = ["close", "volume", "low", "pre_close", "open", "turnover"]
     for col in numeric_cols:
         out[col] = pd.to_numeric(out[col], errors="coerce")
     # Tushare daily.amount 单位是千元，这里统一转成元，和 AkShare 保持一致。
@@ -152,7 +95,6 @@ def _fetch_daily_tushare(trade_date: str, logger: logging.Logger) -> pd.DataFram
             "pre_close",
             "open",
             "turnover",
-            "turnover_rate",
         ]
     ]
     out = out.dropna(subset=["code", "date", "close", "volume", "low"]).reset_index(drop=True)
@@ -167,7 +109,7 @@ def _fetch_daily_akshare(logger: logging.Logger) -> pd.DataFrame:
     if df is None or df.empty:
         raise RuntimeError("AkShare stock_zh_a_spot_em 返回空")
 
-    for col in ["代码", "最新价", "成交量", "最低", "昨收", "今开", "成交额", "换手率"]:
+    for col in ["代码", "最新价", "成交量", "最低", "昨收", "今开", "成交额"]:
         if col not in df.columns:
             raise ValueError(f"AkShare 实时接口缺少字段: {col}")
 
@@ -182,7 +124,6 @@ def _fetch_daily_akshare(logger: logging.Logger) -> pd.DataFrame:
             "pre_close": pd.to_numeric(df["昨收"], errors="coerce"),
             "open": pd.to_numeric(df["今开"], errors="coerce"),
             "turnover": pd.to_numeric(df["成交额"], errors="coerce"),
-            "turnover_rate": pd.to_numeric(df["换手率"], errors="coerce"),
         }
     )
     out = out.dropna(subset=["code", "close", "volume", "low"]).reset_index(drop=True)
@@ -199,97 +140,6 @@ def fetch_daily_core(trade_date: str, logger: logging.Logger) -> tuple[pd.DataFr
         return _fetch_daily_akshare(logger=logger), "akshare"
 
 
-def fetch_akshare_enrichment_per_stock(
-    codes: list[str],
-    logger: logging.Logger,
-    progress_logger: MongoProgressLogger | None = None,
-    run_id: str = "",
-    trade_date: str = "",
-) -> tuple[dict[str, dict], list[dict]]:
-    import akshare as ak  # type: ignore
-
-    sleep_sec = float(os.getenv("AK_ENRICH_SLEEP_SECONDS", "0.25"))
-    max_retries = int(os.getenv("AK_ENRICH_RETRIES", "2"))
-    lookback_days = int(os.getenv("AK_TURNOVER_LOOKBACK_DAYS", "30"))
-    limit = int(os.getenv("AK_ENRICH_CODES_LIMIT", "0"))
-
-    if limit > 0:
-        codes = codes[:limit]
-
-    start_date = (datetime.now() - pd.Timedelta(days=lookback_days)).strftime("%Y%m%d")
-    end_date = datetime.now().strftime("%Y%m%d")
-
-    result: dict[str, dict] = {}
-    failed_mktcap: list[dict] = []
-    for idx, code in enumerate(codes, start=1):
-        code6 = _norm_code(code)
-        em_symbol = _to_em_symbol(code6)
-        mktcap = None
-        turnover_rate = None
-        mktcap_error = ""
-
-        # 1) mktcap: stock_zh_scale_comparison_em
-        if not em_symbol.startswith("BJ"):
-            for _ in range(max_retries + 1):
-                try:
-                    scale_df = ak.stock_zh_scale_comparison_em(symbol=em_symbol)
-                    if scale_df is not None and not scale_df.empty and {"代码", "总市值"}.issubset(scale_df.columns):
-                        hit = scale_df[scale_df["代码"].astype(str).str.zfill(6) == code6]
-                        if not hit.empty:
-                            mv = pd.to_numeric(hit.iloc[0]["总市值"], errors="coerce")
-                            if pd.notna(mv):
-                                mktcap = float(mv)
-                    break
-                except Exception as exc:
-                    mktcap_error = str(exc)[:300]
-                    time.sleep(0.2)
-        if mktcap is None:
-            if not mktcap_error:
-                mktcap_error = "empty_or_no_match"
-            failed_mktcap.append({"code": code6, "reason": mktcap_error})
-
-        # 2) turnover_rate: stock_zh_a_hist (最近窗口取最后有效值)
-        for _ in range(max_retries + 1):
-            try:
-                hist_df = ak.stock_zh_a_hist(
-                    symbol=code6,
-                    period="daily",
-                    start_date=start_date,
-                    end_date=end_date,
-                    adjust="",
-                )
-                if hist_df is not None and not hist_df.empty and "换手率" in hist_df.columns:
-                    tr = pd.to_numeric(hist_df["换手率"], errors="coerce").dropna()
-                    if not tr.empty:
-                        turnover_rate = float(tr.iloc[-1])
-                break
-            except Exception:
-                time.sleep(0.2)
-
-        result[code6] = {"mktcap": mktcap, "turnover_rate": turnover_rate}
-
-        if idx % 200 == 0:
-            got_m = sum(1 for v in result.values() if v.get("mktcap") is not None)
-            got_t = sum(1 for v in result.values() if v.get("turnover_rate") is not None)
-            msg = f"AkShare 逐只补充进度: {idx}/{len(codes)}, mktcap={got_m}, turnover_rate={got_t}"
-            logger.info(msg)
-            if progress_logger is not None:
-                progress_logger.write(
-                    run_id=run_id,
-                    trade_date=trade_date,
-                    stage="akshare_enrichment",
-                    processed=idx,
-                    total=len(codes),
-                    mktcap_count=got_m,
-                    turnover_rate_count=got_t,
-                    message=msg,
-                )
-        if sleep_sec > 0:
-            time.sleep(sleep_sec)
-
-    return result, failed_mktcap
-
-
 def write_local_snapshot(df: pd.DataFrame, trade_date: str, logger: logging.Logger) -> Path:
     out_dir = Path(os.getenv("SNAPSHOT_DIR", "outputs/snapshots"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -304,6 +154,30 @@ def write_local_snapshot(df: pd.DataFrame, trade_date: str, logger: logging.Logg
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     logger.info("本地快照已写入: %s", path)
     return path
+
+
+def _snapshot_path(trade_date: str) -> Path:
+    out_dir = Path(os.getenv("SNAPSHOT_DIR", "outputs/snapshots"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / f"market_daily_{trade_date}.json"
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _load_local_snapshot(trade_date: str) -> tuple[Path, dict, pd.DataFrame]:
+    path = _snapshot_path(trade_date)
+    if not path.exists():
+        raise RuntimeError(f"未找到本地快照: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        raise RuntimeError(f"本地快照 data 格式异常: {path}")
+    df = pd.DataFrame(data)
+    return path, payload, df
 
 
 def _merge_history(existing_data: list[dict] | None, new_row: dict) -> list[dict]:
@@ -341,7 +215,6 @@ def upload_snapshot_to_mongo(df: pd.DataFrame, trade_date: str, source_tag: str,
             "pre_close": None if pd.isna(r.get("pre_close")) else float(r.get("pre_close")),
             "open": None if pd.isna(r.get("open")) else float(r.get("open")),
             "turnover": None if pd.isna(r.get("turnover")) else float(r.get("turnover")),
-            "turnover_rate": None if pd.isna(r.get("turnover_rate")) else float(r.get("turnover_rate")),
         }
         merged_data = _merge_history(old.get("data", []), daily_row)
 
@@ -385,153 +258,118 @@ def upload_snapshot_to_mongo(df: pd.DataFrame, trade_date: str, source_tag: str,
     return len(ops)
 
 
-def run_daily_market_ingest(logger: logging.Logger) -> IngestResult:
+def run_daily_ingest_step1(logger: logging.Logger, trade_date: str | None = None) -> IngestResult:
     _load_env_file(Path(".env"))
-    trade_date = datetime.now().strftime("%Y%m%d")
-    run_id = f"ingest_{trade_date}_{datetime.now().strftime('%H%M%S')}"
-    progress_logger = MongoProgressLogger()
+    trade_date = trade_date or datetime.now().strftime("%Y%m%d")
+    existing_path = _snapshot_path(trade_date)
+    if existing_path.exists():
+        try:
+            _, _, existing_df = _load_local_snapshot(trade_date)
+            if not existing_df.empty:
+                logger.info("检测到当日本地快照已存在，跳过 step1 拉取: %s", existing_path)
+                return IngestResult(
+                    trade_date=trade_date,
+                    stock_list_count=int(len(existing_df)),
+                    daily_rows=int(len(existing_df)),
+                    mktcap_filled=int(pd.to_numeric(existing_df.get("mktcap"), errors="coerce").notna().sum()),
+                    mongo_upserts=0,
+                    snapshot_file=str(existing_path),
+                )
+        except Exception:
+            pass
 
     daily_df, daily_source = fetch_daily_core(trade_date=trade_date, logger=logger)
     merged = daily_df.dropna(subset=["close", "volume", "low"]).reset_index(drop=True)
+    merged["mktcap"] = pd.NA
     logger.info("当日全量股票池(来自日线): %s", len(merged))
-    progress_logger.write(
-        run_id=run_id,
-        trade_date=trade_date,
-        stage="start",
-        processed=0,
-        total=len(merged),
-        mktcap_count=0,
-        turnover_rate_count=0,
-        message=f"ingest start, total={len(merged)}",
-    )
-
-    # 逐只补充 AkShare 字段：mktcap + turnover_rate
-    enrich_map, failed_mktcap = fetch_akshare_enrichment_per_stock(
-        merged["code"].astype(str).tolist(),
-        logger=logger,
-        progress_logger=progress_logger,
-        run_id=run_id,
-        trade_date=trade_date,
-    )
-    merged["mktcap"] = merged["code"].map(lambda c: (enrich_map.get(str(c)) or {}).get("mktcap"))
-    merged["turnover_rate"] = merged.apply(
-        lambda r: (enrich_map.get(str(r["code"])) or {}).get("turnover_rate")
-        if pd.isna(r.get("turnover_rate"))
-        else r.get("turnover_rate"),
-        axis=1,
-    )
-    mkt_filled = int(pd.to_numeric(merged["mktcap"], errors="coerce").notna().sum())
-    if failed_mktcap:
-        progress_logger.write_many(
-            [
-                {
-                    "run_id": run_id,
-                    "trade_date": trade_date,
-                    "stage": "mktcap_failed",
-                    "code": item["code"],
-                    "reason": item.get("reason", ""),
-                    "retry_status": "pending",
-                    "retry_count": 0,
-                    "created_at": datetime.utcnow(),
-                }
-                for item in failed_mktcap
-            ]
-        )
-        logger.info("mktcap 拉取失败已记录到 log: %s 只", len(failed_mktcap))
 
     snapshot_file = write_local_snapshot(merged, trade_date=trade_date, logger=logger)
     mongo_upserts = upload_snapshot_to_mongo(
         merged,
         trade_date=trade_date,
-        source_tag=f"daily_ingest:{daily_source}+ak_scale",
+        source_tag=f"daily_ingest_step1:{daily_source}",
         logger=logger,
     )
-    progress_logger.write(
-        run_id=run_id,
-        trade_date=trade_date,
-        stage="done",
-        processed=len(merged),
-        total=len(merged),
-        mktcap_count=mkt_filled,
-        turnover_rate_count=int(pd.to_numeric(merged["turnover_rate"], errors="coerce").notna().sum()),
-        message=f"ingest done, upserts={mongo_upserts}",
-    )
-
     return IngestResult(
         trade_date=trade_date,
         stock_list_count=int(len(merged)),
         daily_rows=int(len(merged)),
-        mktcap_filled=mkt_filled,
+        mktcap_filled=0,
         mongo_upserts=int(mongo_upserts),
         snapshot_file=str(snapshot_file),
     )
 
 
-def retry_failed_mktcap(logger: logging.Logger, trade_date: str | None = None) -> dict[str, int]:
+def run_mktcap_enrich_step2(logger: logging.Logger, trade_date: str | None = None) -> IngestResult:
     _load_env_file(Path(".env"))
-    progress_logger = MongoProgressLogger()
-    if not progress_logger.enabled or progress_logger._coll is None:
-        raise RuntimeError("Mongo log collection 不可用，无法重试 mktcap")
+    trade_date = trade_date or datetime.now().strftime("%Y%m%d")
+    path, payload, df = _load_local_snapshot(trade_date)
+    if df.empty or "code" not in df.columns:
+        raise RuntimeError(f"本地快照为空或缺少 code 字段: {path}")
 
     import akshare as ak  # type: ignore
 
-    uri = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017").strip()
-    db_name = os.getenv("MONGO_DB", "quant_screener").strip() or "quant_screener"
-    coll_name = os.getenv("MONGO_COLLECTION", "market_cache").strip() or "market_cache"
-    cache_coll = MongoClient(uri)[db_name][coll_name]
-    log_coll = progress_logger._coll
-
-    query = {"stage": "mktcap_failed", "retry_status": {"$ne": "success"}}
-    if trade_date:
-        query["trade_date"] = trade_date
+    sleep_sec = float(os.getenv("AK_ENRICH_SLEEP_SECONDS", "0.25"))
+    max_retries = int(os.getenv("AK_ENRICH_RETRIES", "2"))
+    limit = int(os.getenv("AK_ENRICH_CODES_LIMIT", "0"))
+    if "mktcap" in df.columns:
+        pending_df = df[df["mktcap"].isna()]
     else:
-        latest = log_coll.find({"stage": "mktcap_failed"}, {"trade_date": 1}).sort("created_at", -1).limit(1)
-        latest_row = next(latest, None)
-        if latest_row and latest_row.get("trade_date"):
-            query["trade_date"] = latest_row["trade_date"]
+        pending_df = df
+    codes = pending_df["code"].astype(str).map(_norm_code).tolist()
+    if limit > 0:
+        codes = codes[:limit]
 
-    rows = list(log_coll.find(query, {"_id": 1, "code": 1, "trade_date": 1, "retry_count": 1}))
-    if not rows:
-        logger.info("没有待重试的 mktcap 失败记录")
-        return {"total": 0, "success": 0, "failed": 0}
-
-    success, failed = 0, 0
-    for idx, row in enumerate(rows, start=1):
-        code = _norm_code(str(row.get("code", "")))
-        symbol = _to_em_symbol(code)
+    code_idx = {str(_norm_code(c)): i for i, c in enumerate(df["code"].astype(str).tolist())}
+    for idx, code in enumerate(codes, start=1):
+        em_symbol = _to_em_symbol(code)
         mktcap = None
-        err = ""
-        try:
-            if not symbol.startswith("BJ"):
-                df = ak.stock_zh_scale_comparison_em(symbol=symbol)
-                if df is not None and not df.empty and {"代码", "总市值"}.issubset(df.columns):
-                    hit = df[df["代码"].astype(str).str.zfill(6) == code]
-                    if not hit.empty:
-                        mv = pd.to_numeric(hit.iloc[0]["总市值"], errors="coerce")
-                        if pd.notna(mv):
-                            mktcap = float(mv)
-        except Exception as exc:
-            err = str(exc)[:300]
+        if not em_symbol.startswith("BJ"):
+            for _ in range(max_retries + 1):
+                try:
+                    scale_df = ak.stock_zh_scale_comparison_em(symbol=em_symbol)
+                    if scale_df is not None and not scale_df.empty and {"代码", "总市值"}.issubset(scale_df.columns):
+                        hit = scale_df[scale_df["代码"].astype(str).str.zfill(6) == code]
+                        if not hit.empty:
+                            mv = pd.to_numeric(hit.iloc[0]["总市值"], errors="coerce")
+                            if pd.notna(mv):
+                                mktcap = float(mv)
+                    break
+                except Exception:
+                    time.sleep(0.2)
 
-        if mktcap is not None:
-            cache_coll.update_one({"_id": code}, {"$set": {"mktcap": mktcap, "updated_at": datetime.utcnow()}}, upsert=True)
-            log_coll.update_one(
-                {"_id": row["_id"]},
-                {"$set": {"retry_status": "success", "retried_at": datetime.utcnow(), "mktcap": mktcap}},
-            )
-            success += 1
-        else:
-            log_coll.update_one(
-                {"_id": row["_id"]},
-                {
-                    "$set": {"retry_status": "failed", "retried_at": datetime.utcnow(), "retry_error": err or "empty_or_no_match"},
-                    "$inc": {"retry_count": 1},
-                },
-            )
-            failed += 1
+        # 每拉一只都落本地（用户要求）
+        row_idx = code_idx.get(code)
+        if row_idx is not None:
+            payload["data"][row_idx]["mktcap"] = mktcap
+            _write_json_atomic(path, payload)
 
         if idx % 200 == 0:
-            logger.info("mktcap 重试进度: %s/%s, success=%s, failed=%s", idx, len(rows), success, failed)
+            logger.info("step2 进度: %s/%s", idx, len(codes))
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
 
-    logger.info("mktcap 重试完成: total=%s, success=%s, failed=%s", len(rows), success, failed)
-    return {"total": len(rows), "success": success, "failed": failed}
+    # 统一落库
+    df2 = pd.DataFrame(payload.get("data", []))
+    mkt_filled = int(pd.to_numeric(df2.get("mktcap"), errors="coerce").notna().sum())
+    mongo_upserts = upload_snapshot_to_mongo(
+        df2,
+        trade_date=trade_date,
+        source_tag="daily_ingest_step2:ak_scale_local_then_db",
+        logger=logger,
+    )
+
+    return IngestResult(
+        trade_date=trade_date,
+        stock_list_count=int(len(df2)),
+        daily_rows=int(len(df2)),
+        mktcap_filled=mkt_filled,
+        mongo_upserts=int(mongo_upserts),
+        snapshot_file=str(path),
+    )
+
+
+def run_daily_market_ingest(logger: logging.Logger) -> IngestResult:
+    step1 = run_daily_ingest_step1(logger=logger)
+    step2 = run_mktcap_enrich_step2(logger=logger, trade_date=step1.trade_date)
+    return step2

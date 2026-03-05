@@ -29,7 +29,7 @@ cp .env.example .env
 `ingest` 流程：
 
 1. 用 Tushare（失败则回退 AkShare）拉当日全量日线；
-2. 基于当日日线股票池，用 AkShare 逐只补充：`mktcap + turnover_rate`；
+2. 基于当日日线股票池，用 AkShare 逐只补充：`mktcap`；
 4. 先写本地快照（`SNAPSHOT_DIR`），全部完成后再批量上传 Mongo。
 
 说明：`breakout` 默认不自动在线同步（`BREAKOUT_AUTO_SYNC=false`），只使用数据库/缓存数据；如需恢复旧行为可设为 `true`。
@@ -46,8 +46,9 @@ cp .env.example .env
 ```bash
 python -m scripts.main etf
 python -m scripts.main breakout
+python -m scripts.main ingest-daily
+python -m scripts.main ingest-mktcap --trade-date 20260305
 python -m scripts.main ingest
-python -m scripts.main retry-mktcap --trade-date 20260304
 python -m scripts.main all
 ```
 
