@@ -206,6 +206,29 @@ def _load_local_snapshot(trade_date: str) -> tuple[Path, dict, pd.DataFrame]:
     return path, payload, df
 
 
+def is_snapshot_for_today(snapshot_file: str | Path) -> bool:
+    path = Path(snapshot_file)
+    if not path.exists():
+        return False
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+
+    data = payload.get("data", [])
+    if not isinstance(data, list) or not data:
+        return False
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("date", "")).strip() == today:
+            return True
+    return False
+
+
 def _merge_history(existing_data: list[dict] | None, new_row: dict) -> list[dict]:
     rows = [x for x in (existing_data or []) if isinstance(x, dict)]
     rows = [x for x in rows if x.get("date") != new_row.get("date")]
@@ -386,5 +409,8 @@ def run_mktcap_enrich_step2(logger: logging.Logger, trade_date: str | None = Non
 
 def run_daily_market_ingest(logger: logging.Logger) -> IngestResult:
     step1 = run_daily_ingest_step1(logger=logger)
+    if not is_snapshot_for_today(step1.snapshot_file):
+        logger.info("快照交易日期不是今日，跳过 step2(mktcap) 与后续筛选")
+        return step1
     step2 = run_mktcap_enrich_step2(logger=logger, trade_date=step1.trade_date)
     return step2

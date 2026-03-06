@@ -286,18 +286,21 @@ def run_sync_module(ds, logger: logging.Logger) -> None:
     )
 
 
-def run_ingest_module(logger: logging.Logger) -> None:
+def run_ingest_module(logger: logging.Logger) -> bool:
     ingest = import_module("scripts.jobs.daily_market_ingest")
     result = ingest.run_daily_market_ingest(logger=logger)
+    is_today = bool(ingest.is_snapshot_for_today(result.snapshot_file))
     logger.info(
-        "数据采集完成: trade_date=%s, list=%s, daily=%s, mktcap_filled=%s, mongo_upserts=%s, snapshot=%s",
+        "数据采集完成: trade_date=%s, list=%s, daily=%s, mktcap_filled=%s, mongo_upserts=%s, snapshot=%s, is_today=%s",
         result.trade_date,
         result.stock_list_count,
         result.daily_rows,
         result.mktcap_filled,
         result.mongo_upserts,
         result.snapshot_file,
+        is_today,
     )
+    return is_today
 
 
 def run_ingest_daily_module(logger: logging.Logger) -> None:
@@ -384,7 +387,10 @@ def main() -> int:
 
     if args.command == "ingest":
         try:
-            run_ingest_module(logger)
+            should_continue = run_ingest_module(logger)
+            if not should_continue:
+                logger.info("快照非今日交易数据，ingest 到此结束（跳过 breakout）")
+                return 0
             ds = build_mongo_breakout_ds(logger)
             run_breakout_module(ds, cfg, logger, pause_note="")
             return 0
