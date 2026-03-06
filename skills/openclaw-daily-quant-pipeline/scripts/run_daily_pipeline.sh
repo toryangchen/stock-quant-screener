@@ -15,10 +15,25 @@ if [[ ! -f ".env" ]]; then
   exit 1
 fi
 
+# Load .env vars (MONGO_URI, TUSHARE_TOKEN, etc.)
+set -a
+# shellcheck disable=SC1091
+source .env
+set +a
+
 TRADE_DATE="${TRADE_DATE:-$(date +%Y%m%d)}"
+MONGO_DB="${MONGO_DB:-quant_screener}"
+
+mongo_ping() {
+  if [[ -n "${MONGO_URI:-}" ]]; then
+    mongosh --quiet "$MONGO_URI" --eval 'db.adminCommand({ping:1}).ok' >/dev/null 2>&1
+  else
+    mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' >/dev/null 2>&1
+  fi
+}
 
 ensure_mongo_running() {
-  if mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' >/dev/null 2>&1; then
+  if mongo_ping; then
     return 0
   fi
 
@@ -35,7 +50,7 @@ ensure_mongo_running() {
     if command -v sudo >/dev/null 2>&1; then
       sudo -n bash -lc "$cmd" >/dev/null 2>&1 || true
     fi
-    if mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' >/dev/null 2>&1; then
+    if mongo_ping; then
       echo "MongoDB started successfully."
       return 0
     fi
@@ -95,7 +110,8 @@ else
 fi
 
 echo "[4/4] mongo post-check"
-mongosh --quiet --eval '
+if [[ -n "${MONGO_URI:-}" ]]; then
+  mongosh --quiet "$MONGO_URI" --eval '
 const dbx = db.getSiblingDB("quant_screener");
 const nonStock = dbx.market_cache.countDocuments({_id: {$not: /^\\d{6}$/}});
 if (nonStock > 0) {
@@ -106,5 +122,18 @@ const today = new Date().toISOString().slice(0, 10);
 const screening = dbx.screening_history.countDocuments({run_date: today});
 printjson({ok: 1, non_stock_docs: nonStock, screening_today: screening});
 '
+else
+  mongosh --quiet --eval '
+const dbx = db.getSiblingDB("quant_screener");
+const nonStock = dbx.market_cache.countDocuments({_id: {$not: /^\\d{6}$/}});
+if (nonStock > 0) {
+  printjson({ok: 0, non_stock_docs: nonStock});
+  quit(2);
+}
+const today = new Date().toISOString().slice(0, 10);
+const screening = dbx.screening_history.countDocuments({run_date: today});
+printjson({ok: 1, non_stock_docs: nonStock, screening_today: screening});
+'
+fi
 
 echo "DONE"
