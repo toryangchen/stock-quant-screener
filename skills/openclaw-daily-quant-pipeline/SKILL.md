@@ -1,18 +1,18 @@
 ---
 name: openclaw-daily-quant-pipeline
-description: Run the daily A-share automation on server: ingest daily full-market data into market_cache, enrich mktcap (skip BJ), run breakout screening, and verify market_cache remains stock-id-only.
+description: From local OpenClaw, SSH into cloud server to start daily A-share pipeline in background, recheck snapshot JSON after 1 hour, and rerun once if snapshot is invalid.
 ---
 
 # OpenClaw Daily Quant Pipeline
 
-Use this skill when the user asks to run or schedule the daily stock pipeline on a server/OpenClaw.
+Use this skill when the user asks local OpenClaw to SSH into cloud server and run the daily stock pipeline with delayed verification.
 
 ## Preconditions
 
-- Run in repo root: `~/apps/stock-quant-screener` (or deployed equivalent path).
-- `.env` contains valid Mongo and Tushare config.
-- Python env exists at `.venv`.
-- MongoDB target db is `quant_screener`.
+- Local machine can SSH to cloud server.
+- SSH key is available (default: `~/Ubantu_Server.pem`).
+- Remote repo path is `~/apps/stock-quant-screener` (override if needed).
+- Remote `.env` contains valid Mongo and Tushare config.
 
 ## Required Invariants
 
@@ -22,52 +22,56 @@ Use this skill when the user asks to run or schedule the daily stock pipeline on
 
 ## Workflow
 
-Run the bundled script:
+Run the local launcher script:
 
 ```bash
-bash skills/openclaw-daily-quant-pipeline/scripts/run_daily_pipeline.sh
+bash skills/openclaw-daily-quant-pipeline/scripts/run_remote_pipeline_with_recheck.sh
+```
+
+Configurable env vars:
+
+```bash
+REMOTE_HOST=192.144.236.58
+REMOTE_USER=ubuntu
+REMOTE_PORT=22
+REMOTE_KEY=~/Ubantu_Server.pem
+REMOTE_REPO=~/apps/stock-quant-screener
+TRADE_DATE=YYYYMMDD
+WAIT_SECONDS=3600
 ```
 
 The script executes:
 
-1. Pre-check Mongo service:
-
-- ping Mongo before writing.
-- if unavailable, auto-try start service (`systemctl/service/brew services`) and recheck.
-
-2. `ingest-daily`: fetch current trading day full-market daily data and write to local snapshot + `market_cache`.
-3. `ingest-mktcap`: fill `mktcap` from AkShare one-by-one (current code skips BJ).
-4. Retry path:
-
-- after first `ingest-mktcap`, count missing `mktcap` for non-BJ stocks in snapshot.
-- if missing > 0, rerun `scripts.main ingest` once.
-- if missing == 0, run `breakout` directly.
-
-5. Post-checks on Mongo:
-
-- `market_cache` has zero non-stock `_id` docs.
-- print today `screening_history` count.
+1. SSH to remote server and run `run_daily_pipeline_bg.sh` in background.
+2. Wait 1 hour (`WAIT_SECONDS`).
+3. SSH again and verify `outputs/snapshots/market_daily_YYYYMMDD.json`:
+- file exists
+- `data` is a non-empty list (>=1000 rows)
+- contains at least one row whose `date` equals trade date
+4. If verification fails, SSH and rerun remote background pipeline once.
 
 ## Outputs
 
-- Snapshot JSON: `outputs/snapshots/market_daily_YYYYMMDD.json`
-- Candidate files:
-- `outputs/trend_breakout_candidates.csv`
-- `outputs/trend_breakout_candidates.xlsx`
-- Mongo collections:
-- `market_cache`
-- `screening_history`
+- Remote snapshot JSON: `outputs/snapshots/market_daily_YYYYMMDD.json`
+- Remote logs: `outputs/logs/daily_pipeline_*.log`
+- Remote PID file: `outputs/logs/daily_pipeline.pid`
 
 ## Failure Handling
 
-- If `ingest-daily` fails, stop immediately.
-- If `ingest-mktcap` fails, stop and keep snapshot for retry.
-- If post-check finds non-stock docs in `market_cache`, treat as failure.
+- If SSH connection fails, stop immediately.
+- If 1-hour snapshot verification fails, rerun once automatically.
+- If rerun also fails, stop and return failure details.
 
 ## Manual Retry Commands
 
 ```bash
-.venv/bin/python -m scripts.main ingest-daily
-.venv/bin/python -m scripts.main ingest-mktcap --trade-date YYYYMMDD
-.venv/bin/python -m scripts.main breakout
+bash skills/openclaw-daily-quant-pipeline/scripts/run_remote_pipeline_with_recheck.sh
+```
+
+## Background Job Ops
+
+```bash
+ssh -i ~/Ubantu_Server.pem ubuntu@192.144.236.58 'cd ~/apps/stock-quant-screener && tail -f outputs/logs/daily_pipeline_*.log'
+ssh -i ~/Ubantu_Server.pem ubuntu@192.144.236.58 'cd ~/apps/stock-quant-screener && cat outputs/logs/daily_pipeline.pid'
+ssh -i ~/Ubantu_Server.pem ubuntu@192.144.236.58 'cd ~/apps/stock-quant-screener && kill "$(cat outputs/logs/daily_pipeline.pid)"'
 ```
