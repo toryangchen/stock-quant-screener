@@ -4,13 +4,28 @@ set -euo pipefail
 # Local launcher: SSH to remote server, start remote background pipeline,
 # wait 1 hour, then verify snapshot json; rerun once if invalid.
 
-REMOTE_HOST="${REMOTE_HOST:-192.144.236.58}"
-REMOTE_USER="${REMOTE_USER:-ubuntu}"
+ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+if [[ -f ".env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
+REMOTE_HOST="${REMOTE_HOST:-}"
+REMOTE_USER="${REMOTE_USER:-}"
 REMOTE_PORT="${REMOTE_PORT:-22}"
-REMOTE_KEY="${REMOTE_KEY:-$HOME/Ubantu_Server.pem}"
+REMOTE_KEY="${REMOTE_KEY:-}"
 REMOTE_REPO="${REMOTE_REPO:-~/apps/stock-quant-screener}"
 WAIT_SECONDS="${WAIT_SECONDS:-3600}"
 TRADE_DATE="${TRADE_DATE:-$(date +%Y%m%d)}"
+
+if [[ -z "$REMOTE_HOST" || -z "$REMOTE_USER" ]]; then
+  echo "ERROR: REMOTE_HOST and REMOTE_USER must be set in .env or environment."
+  exit 1
+fi
 
 SSH_OPTS=(
   -p "$REMOTE_PORT"

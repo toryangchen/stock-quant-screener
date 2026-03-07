@@ -10,8 +10,9 @@ Use this skill when the user asks local OpenClaw to SSH into cloud server and ru
 ## Preconditions
 
 - Local machine can SSH to cloud server.
-- SSH key is available (default: `~/Ubantu_Server.pem`).
-- Remote repo path is `~/apps/stock-quant-screener` (override if needed).
+- Remote SSH config comes from local `.env`.
+- Required vars: `REMOTE_HOST`, `REMOTE_USER`
+- Optional vars: `REMOTE_PORT`, `REMOTE_KEY`, `REMOTE_REPO`
 - Remote `.env` contains valid Mongo and Tushare config.
 
 ## Required Invariants
@@ -31,10 +32,10 @@ bash skills/openclaw-daily-quant-pipeline/scripts/run_remote_pipeline_with_reche
 Configurable env vars:
 
 ```bash
-REMOTE_HOST=192.144.236.58
-REMOTE_USER=ubuntu
+REMOTE_HOST=your_server_ip
+REMOTE_USER=your_server_user
 REMOTE_PORT=22
-REMOTE_KEY=~/Ubantu_Server.pem
+REMOTE_KEY=/absolute/path/to/your_ssh_key.pem
 REMOTE_REPO=~/apps/stock-quant-screener
 TRADE_DATE=YYYYMMDD
 WAIT_SECONDS=3600
@@ -71,7 +72,7 @@ bash skills/openclaw-daily-quant-pipeline/scripts/run_remote_pipeline_with_reche
 ## Background Job Ops
 
 ```bash
-ssh -i ~/Ubantu_Server.pem ubuntu@192.144.236.58 'cd ~/apps/stock-quant-screener && tail -f outputs/logs/daily_pipeline_*.log'
-ssh -i ~/Ubantu_Server.pem ubuntu@192.144.236.58 'cd ~/apps/stock-quant-screener && cat outputs/logs/daily_pipeline.pid'
-ssh -i ~/Ubantu_Server.pem ubuntu@192.144.236.58 'cd ~/apps/stock-quant-screener && kill "$(cat outputs/logs/daily_pipeline.pid)"'
+ssh -i "$REMOTE_KEY" "$REMOTE_USER@$REMOTE_HOST" 'cd ~/apps/stock-quant-screener && tail -f outputs/logs/daily_pipeline_*.log'
+ssh -i "$REMOTE_KEY" "$REMOTE_USER@$REMOTE_HOST" 'cd ~/apps/stock-quant-screener && cat outputs/logs/daily_pipeline.pid'
+ssh -i "$REMOTE_KEY" "$REMOTE_USER@$REMOTE_HOST" 'cd ~/apps/stock-quant-screener && kill "$(cat outputs/logs/daily_pipeline.pid)"'
 ```
