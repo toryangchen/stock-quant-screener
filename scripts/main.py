@@ -122,7 +122,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="A-share quant screener demo")
     parser.add_argument(
         "command",
-        choices=["etf", "breakout", "sync", "ingest", "ingest-daily", "ingest-mktcap", "all"],
+        choices=["etf", "etf-rotation", "ingest-etf", "breakout", "sync", "ingest", "ingest-daily", "ingest-mktcap"],
     )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--scan-limit", type=int, default=None)
@@ -146,15 +146,34 @@ def apply_overrides(cfg: AppConfig, args: argparse.Namespace) -> AppConfig:
 
 def run_etf_module(ds, cfg: AppConfig, logger: logging.Logger) -> None:
     run_etf_rotation = import_module("scripts.logic.etf_rotation").run_etf_rotation
+    history = import_module("scripts.output.etf_history").MongoEtfHistory()
     writer = import_module("scripts.output.writer")
     etf_df, decision = run_etf_rotation(ds=ds, cfg=cfg, logger=logger)
+    saved = history.save_daily(run_date=cfg.run_date.strftime("%Y-%m-%d"), rank_df=etf_df, decision=decision)
     writer.write_dataframe(
         etf_df,
         cfg.output_dir / "etf_rotation_rank.csv",
         cfg.output_dir / "etf_rotation_rank.xlsx",
         "Rank",
     )
-    logger.info("ETF 轮动完成: %s, 输出 %s", decision, cfg.output_dir / "etf_rotation_rank.xlsx")
+    logger.info(
+        "ETF 轮动完成: %s, 输出 %s, etf_history=%s",
+        decision,
+        cfg.output_dir / "etf_rotation_rank.xlsx",
+        saved,
+    )
+
+
+def run_ingest_etf_module(cfg: AppConfig, logger: logging.Logger) -> None:
+    ds = import_module("scripts.data_source.akshare_impl").AkShareDataSource()
+    ingest = import_module("scripts.jobs.etf_cache_ingest")
+    result = ingest.run_etf_cache_ingest(ds=ds, cfg=cfg, logger=logger)
+    logger.info(
+        "ETF 数据采集完成: total=%s, ok=%s, mongo_upserts=%s",
+        result.total_etfs,
+        result.ok_etfs,
+        result.mongo_upserts,
+    )
 
 
 def run_breakout_module(
@@ -334,43 +353,10 @@ def build_mongo_breakout_ds(logger: logging.Logger):
     return ds
 
 
-def run_all(ds, cfg: AppConfig, logger: logging.Logger) -> None:
-    performance = import_module("scripts.logic.performance")
-    equity_curve = import_module("scripts.logic.equity_curve")
-    writer = import_module("scripts.output.writer")
-
-    run_etf_module(ds, cfg, logger)
-    candidates = run_breakout_module(ds, cfg, logger, pause_note="")
-
-    trades_path = cfg.output_dir / "trades.xlsx"
-    performance.ensure_trades_template(trades_path)
-
-    trades_df = performance.load_trades(trades_path)
-    closed = performance.get_closed_trades(trades_df)
-    report = performance.calc_performance_report(closed, cfg)
-
-    eq_df, max_drawdown = equity_curve.build_equity_curve(closed, cfg.account_capital)
-    report.max_drawdown = max_drawdown
-
-    eq_df.to_csv(cfg.output_dir / "equity_curve.csv", index=False, encoding="utf-8-sig")
-    equity_curve.save_equity_curve_png(eq_df, cfg.output_dir / "equity_curve.png")
-
-    if report.trade_paused and not candidates.empty:
-        candidates = candidates.copy()
-        candidates["note"] = "暂停交易"
-        writer.write_dataframe(
-            candidates,
-            cfg.output_dir / "trend_breakout_candidates.csv",
-            cfg.output_dir / "trend_breakout_candidates.xlsx",
-            "Candidates",
-        )
-
-    report_dict = report.to_dict()
-    writer.write_report_excel(report_dict, cfg.output_dir / "report.xlsx")
-    writer.write_report_json(report_dict, cfg.output_dir / "report.json")
-
-    logger.info("绩效统计完成: paused=%s, max_drawdown=%.4f", report.trade_paused, report.max_drawdown)
-    logger.info("all 流程完成, 输出目录: %s", cfg.output_dir)
+def build_mongo_etf_ds(logger: logging.Logger):
+    ds = import_module("scripts.data_source.mongo_etf").MongoEtfDataSource()
+    logger.info("ETF DataSource 使用 MongoEtf(etf_cache)")
+    return ds
 
 
 def main() -> int:
@@ -397,6 +383,13 @@ def main() -> int:
         except Exception as exc:
             logger.error("执行失败: %s", exc)
             return 3
+    if args.command == "ingest-etf":
+        try:
+            run_ingest_etf_module(cfg, logger)
+            return 0
+        except Exception as exc:
+            logger.error("执行失败: %s", exc)
+            return 3
     if args.command == "ingest-daily":
         try:
             run_ingest_daily_module(logger)
@@ -412,7 +405,9 @@ def main() -> int:
             logger.error("执行失败: %s", exc)
             return 3
     try:
-        if args.command == "breakout":
+        if args.command in {"etf", "etf-rotation"}:
+            ds = build_mongo_etf_ds(logger)
+        elif args.command == "breakout":
             ds = build_mongo_breakout_ds(logger)
         else:
             ts_token = os.getenv("TUSHARE_TOKEN", "").strip()
@@ -432,14 +427,12 @@ def main() -> int:
         return 2
 
     try:
-        if args.command == "etf":
+        if args.command in {"etf", "etf-rotation"}:
             run_etf_module(ds, cfg, logger)
         elif args.command == "breakout":
             run_breakout_module(ds, cfg, logger, pause_note="")
         elif args.command == "sync":
             run_sync_module(ds, logger)
-        else:
-            run_all(ds, cfg, logger)
         return 0
     except Exception as exc:
         logger.error("执行失败: %s", exc)

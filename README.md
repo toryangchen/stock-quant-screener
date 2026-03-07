@@ -1,71 +1,242 @@
-# Quant Screener Demo
+# Stock Quant Screener
 
-面向 A 股小资金场景的命令行量化筛选 Demo（仅筛选与执行辅助，不含自动下单）。
+面向 A 股小资金场景的筛选项目。当前分成两条独立流程：
 
-## 安装
+- A 股日筛：拉全量股票日线、补 `mktcap`、做初筛和二筛
+- ETF 周轮动：拉 ETF 历史数据、做轮动排序、落库历史结果
+
+项目不做自动下单，当前职责是数据采集、规则筛选、结果落库和可视化跟踪。
+
+## 目录
+
+- `scripts/`: Python 命令行脚本
+- `apps/api`: FastAPI mock 服务
+- `apps/web`: React + TypeScript 跟踪页面
+- `outputs/`: 导出文件、快照和日志
+- `skills/`: OpenClaw/OpenAI Agent 用的自动化技能
+
+## 环境准备
+
+Python:
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-如果你有 Tushare Pro token（推荐），可放到本地 `.env`（已被 gitignore）：
+前端:
+
+```bash
+cd apps/web
+npm install
+```
+
+环境变量建议从 `.env.example` 复制：
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入真实 token
 ```
 
-程序启动时会自动读取 `.env`，并优先使用 Tushare 的 A 股日线；ETF 数据仍由 AkShare 兜底。
-程序内置 Tushare 限流（默认每分钟 50 次），可通过 `TUSHARE_RATE_LIMIT_PER_MINUTE` 调整。
-程序支持 MongoDB 本地缓存（默认开启）：请求前先查缓存，命中则不再请求远端接口。
+至少需要：
 
-## 数据采集与筛选分离
+- `TUSHARE_TOKEN`
+- `MONGO_URI`
+- `MONGO_DB=quant_screener`
 
-- 数据采集：`python -m scripts.main ingest`
-- 股票筛选：`python -m scripts.main breakout`
+当前仓库默认使用 MongoDB，且已经约束：
 
-`ingest` 流程：
+- `market_cache` 只存 A 股股票，`_id` 必须是 6 位股票代码
+- `etf_cache` 单独存 ETF 历史数据
 
-1. 用 Tushare（失败则回退 AkShare）拉当日全量日线；
-2. 基于当日日线股票池，用 AkShare 逐只补充：`mktcap`；
-4. 先写本地快照（`SNAPSHOT_DIR`），全部完成后再批量上传 Mongo。
+## Mongo 表设计
 
-说明：`breakout` 默认不自动在线同步（`BREAKOUT_AUTO_SYNC=false`），只使用数据库/缓存数据；如需恢复旧行为可设为 `true`。
+`market_cache`
 
-## 可视化跟踪页面（新增）
+- 用途：A 股个股近 60 交易日数据缓存
+- `_id`: 6 位股票代码
+- 顶层字段：`exchange`, `name`, `mktcap`, `updated_at`, `data`
+- `data`: 日线数组，字段通常为 `date`, `close`, `volume`, `low`, `pre_close`, `open`, `turnover`
 
-- 前端：`apps/web`（React + TypeScript）
-- 后端：`apps/api`（Python FastAPI，当前为 mock 接口）
+`screening_history`
 
-启动方式见 [`apps/README.md`](/Users/yang/Documents/stock-quant-screener/apps/README.md)。
+- 用途：A 股日筛历史结果
+- `_id`: `[code].[run_date]`
+- 顶层字段保留 `code`, `run_date`，并带初筛/二筛结果字段
 
-## 运行
+`etf_cache`
+
+- 用途：ETF 历史日线缓存
+- `_id`: ETF 代码
+- 顶层字段：`code`, `name`, `updated_at`, `data`
+
+`etf_history`
+
+- 用途：ETF 周轮动排序结果
+- `_id`: `[code].[run_date]`
+- 顶层字段保留 `code`, `run_date`, `decision`, `rank` 等结果字段
+
+## A 股日筛流程
+
+### 1. 拉当日全量股票日线
 
 ```bash
-python -m scripts.main etf
-python -m scripts.main breakout
-python -m scripts.main ingest-daily
-python -m scripts.main ingest-mktcap --trade-date 20260305
-python -m scripts.main ingest
-python -m scripts.main all
+.venv/bin/python -m scripts.main ingest-daily
 ```
 
-可选参数：
+行为：
+
+- 优先用 Tushare `daily(trade_date=YYYYMMDD)` 拉全量
+- 失败时回退 AkShare 实时接口
+- 先写本地快照：`outputs/snapshots/market_daily_YYYYMMDD.json`
+- 再落库到 `market_cache`
+
+### 2. 补 `mktcap`
 
 ```bash
-python -m scripts.main all --output-dir ./outputs --scan-limit 300 --risk-per-trade 0.02 --sleep 0.1
+.venv/bin/python -m scripts.main ingest-mktcap --trade-date 20260307
 ```
 
-## 输出文件
+行为：
 
-- `outputs/etf_rotation_rank.xlsx`
-- `outputs/etf_rotation_rank.csv`
-- `outputs/trend_breakout_candidates.xlsx`
-- `outputs/trend_breakout_candidates.csv`
-- `outputs/trades.xlsx`（首次自动生成模板）
-- `outputs/report.xlsx`
-- `outputs/report.json`
-- `outputs/equity_curve.csv`
-- `outputs/equity_curve.png`
+- 从本地快照读取股票列表
+- 用 AkShare `stock_zh_scale_comparison_em` 逐只补 `mktcap`
+- 北交所股票跳过
+- 每拉一只就回写本地快照，最后再统一更新 `market_cache`
+
+### 3. 执行日筛
+
+```bash
+.venv/bin/python -m scripts.main breakout
+```
+
+行为：
+
+- 只从 `market_cache` 读取数据
+- 不直接请求外部接口
+- 执行初筛和二筛
+- 落库到 `screening_history`
+- 导出：
+  - `outputs/trend_breakout_candidates.csv`
+  - `outputs/trend_breakout_candidates.xlsx`
+
+### 4. 一键日流程
+
+```bash
+.venv/bin/python -m scripts.main ingest
+```
+
+行为：
+
+- 先执行 `ingest-daily`
+- 仅当快照里存在“今日日期”的交易数据时，才继续：
+  - `ingest-mktcap`
+  - `breakout`
+- 如果快照不是今日交易数据，则跳过后续筛选
+
+## ETF 周轮动流程
+
+### 1. 拉 ETF 历史数据
+
+```bash
+.venv/bin/python -m scripts.main ingest-etf
+```
+
+行为：
+
+- 按 ETF 池逐只拉历史日线
+- 落库到 `etf_cache`
+- 当前 ETF 池定义在 [config.py](./scripts/config.py)
+
+### 2. 执行 ETF 轮动排序
+
+```bash
+.venv/bin/python -m scripts.main etf-rotation
+```
+
+行为：
+
+- 只从 `etf_cache` 读取数据
+- 计算：
+  - 近 20 日涨幅
+  - 是否站上 20 日均线
+- 按近 20 日涨幅排序
+- 结果落库到 `etf_history`
+- 导出：
+  - `outputs/etf_rotation_rank.csv`
+  - `outputs/etf_rotation_rank.xlsx`
+
+说明：
+
+- `etf` 与 `etf-rotation` 当前都走同一套 ETF 排序逻辑
+- `all` 命令已删除，ETF 和个股筛选不再混跑
+
+## 当前命令清单
+
+```bash
+.venv/bin/python -m scripts.main ingest-daily
+.venv/bin/python -m scripts.main ingest-mktcap --trade-date 20260307
+.venv/bin/python -m scripts.main ingest
+.venv/bin/python -m scripts.main breakout
+.venv/bin/python -m scripts.main ingest-etf
+.venv/bin/python -m scripts.main etf-rotation
+.venv/bin/python -m scripts.main etf
+```
+
+常用参数：
+
+```bash
+.venv/bin/python -m scripts.main breakout --scan-limit 300 --sleep 0
+.venv/bin/python -m scripts.main ingest-mktcap --trade-date 20260307
+```
+
+## Web 跟踪页面
+
+后端（mock）：
+
+```bash
+cd apps/api
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+前端：
+
+```bash
+cd apps/web
+npm run dev
+```
+
+默认前端请求：
+
+- `http://127.0.0.1:8000`
+
+可通过环境变量覆盖：
+
+```bash
+VITE_API_BASE=http://127.0.0.1:8000 npm run dev
+```
+
+更多说明见 [apps/README.md](./apps/README.md)。
+
+## OpenClaw 自动化
+
+自动化 skill 在：
+
+- [SKILL.md](./skills/openclaw-daily-quant-pipeline/SKILL.md)
+
+当前支持：
+
+- 本地 OpenClaw 通过 SSH 登录云服务器
+- 在服务器后台执行日流程脚本
+- 1 小时后复检远端快照 JSON
+- 若快照异常，自动再重跑一次
+
+## 当前约束
+
+- `breakout` 不允许修改 `market_cache`
+- `market_cache` 不允许写入非股票 `_id`
+- ETF 数据不再混入 `market_cache`
+- ETF 和个股流程拆开执行
