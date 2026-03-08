@@ -3,15 +3,12 @@ import type { ColumnsType } from "antd/es/table";
 import {
   Alert,
   Card,
-  Col,
   Empty,
   Menu,
   Pagination,
-  Row,
   Select,
   Space,
   Spin,
-  Statistic,
   Table,
   Tag,
   Typography,
@@ -29,8 +26,8 @@ import {
 import { fetchDates, fetchEtf, fetchEtfDates, fetchScreening } from "./api";
 import type { EtfPick, EtfResponse, PickedStock, ScreeningResponse } from "./types";
 
-const STOCK_DEFAULT_PAGE_SIZE = 5;
-const ETF_DEFAULT_PAGE_SIZE = 20;
+const STOCK_DEFAULT_PAGE_SIZE = 6;
+const ETF_DEFAULT_PAGE_SIZE = 6;
 
 function pctTone(value: number) {
   return value >= 0 ? "up" : "down";
@@ -47,6 +44,10 @@ function renderNumber(value: number, digits = 2) {
 function formatShortDate(value: string) {
   if (!value || value.length < 10) return value;
   return value.slice(5);
+}
+
+function getTonghuashunUrl(code: string) {
+  return `https://stockpage.10jqka.com.cn/${code}/`;
 }
 
 export default function App() {
@@ -151,8 +152,30 @@ export default function App() {
 
   const stockColumns = useMemo<ColumnsType<PickedStock>>(
     () => [
-      { title: "代码", dataIndex: "code", key: "code", width: 108, fixed: "left" },
-      { title: "名称", dataIndex: "name", key: "name", width: 120, fixed: "left" },
+      {
+        title: "代码",
+        dataIndex: "code",
+        key: "code",
+        width: 108,
+        fixed: "left",
+        render: (value: string) => (
+          <a href={getTonghuashunUrl(value)} target="_blank" rel="noreferrer">
+            {value}
+          </a>
+        ),
+      },
+      {
+        title: "名称",
+        dataIndex: "name",
+        key: "name",
+        width: 120,
+        fixed: "left",
+        render: (_: string, record: PickedStock) => (
+          <a href={getTonghuashunUrl(record.code)} target="_blank" rel="noreferrer">
+            {record.name}
+          </a>
+        ),
+      },
       {
         title: "状态",
         dataIndex: "is_secondary",
@@ -171,16 +194,8 @@ export default function App() {
       { title: "止损价", dataIndex: "stop_price", key: "stop_price", width: 92, render: (value: number) => value.toFixed(2) },
       { title: "MA10", dataIndex: "ma10_price", key: "ma10_price", width: 90, render: (value: number) => renderNumber(value, 3) },
       { title: "MA20", dataIndex: "ma20_price", key: "ma20_price", width: 90, render: (value: number) => renderNumber(value, 3) },
-      { title: "评分", dataIndex: "score", key: "score", width: 88, render: (value: number) => renderNumber(value, 4) },
-      { title: "建议股数", dataIndex: "suggested_shares", key: "suggested_shares", width: 100, render: (value: number) => (value ? value : "-") },
-      {
-        title: "建议仓位",
-        dataIndex: "suggested_position_value",
-        key: "suggested_position_value",
-        width: 110,
-        render: (value: number) => (value ? value.toFixed(0) : "-"),
-      },
       { title: "市值(亿)", dataIndex: "mkt_cap", key: "mkt_cap", width: 100, render: (value: number) => renderNumber(value, 2) },
+      { title: "评分", dataIndex: "score", key: "score", width: 88, render: (value: number) => renderNumber(value, 4) },
     ],
     []
   );
@@ -224,61 +239,61 @@ export default function App() {
         onClick={({ key }) => setView(key as "stocks" | "etf")}
       />
 
-      <div className="hero">
-        <div className="hero-copy">
-          <Typography.Title level={2}>{topTitle}</Typography.Title>
-          <Typography.Paragraph>{topDesc}</Typography.Paragraph>
-        </div>
-        <div className="toolbar-card">
-          <Typography.Text type="secondary">{view === "stocks" ? "筛选日期" : "轮动日期"}</Typography.Text>
-          <Select
-            className="date-select compact"
-            value={selectedDate || undefined}
-            options={dates.map((date) => ({ label: date, value: date }))}
-            onChange={(value) => setSelectedDate(value)}
-            placeholder={view === "stocks" ? "选择筛选日期" : "选择轮动日期"}
-          />
-        </div>
-      </div>
-
       {error && <Alert className="block-gap" type="error" message={error} showIcon />}
 
       <Spin spinning={loading}>
         {view === "stocks" && stockData ? (
           <Space direction="vertical" size={16} className="full-width">
-            <Row gutter={[16, 16]}>
-              <Col xs={12} md={6}>
-                <Card bordered={false}>
-                  <Statistic title="筛选日期" value={stockData.date} />
-                </Card>
-              </Col>
-              <Col xs={12} md={6}>
-                <Card bordered={false}>
-                  <Statistic title="最新交易日" value={stockData.today} />
-                </Card>
-              </Col>
-              <Col xs={12} md={6}>
-                <Card bordered={false}>
-                  <Statistic title="一筛股票" value={allStocks.length} />
-                </Card>
-              </Col>
-              <Col xs={12} md={6}>
-                <Card bordered={false}>
-                  <Statistic title="二筛 / 一筛" value={`${secondaryStocks.length} / ${allStocks.length}`} />
-                </Card>
-              </Col>
-            </Row>
+            <Card bordered={false} className="overview-card">
+              <div className="hero">
+                <div className="hero-copy">
+                  <Typography.Title level={2}>{topTitle}</Typography.Title>
+                  <Typography.Paragraph>{topDesc}</Typography.Paragraph>
+                </div>
+                <div className="toolbar-card">
+                  <Typography.Text type="secondary">筛选日期</Typography.Text>
+                  <Select
+                    className="date-select compact"
+                    value={selectedDate || undefined}
+                    options={dates.map((date) => ({ label: date, value: date }))}
+                    onChange={(value) => setSelectedDate(value)}
+                    placeholder="选择筛选日期"
+                  />
+                </div>
+              </div>
 
-            <Card
-              bordered={false}
-              title={`${stockData.date} 筛选股票列表`}
-              extra={
+              <div className="summary-strip">
+                <div className="summary-pill">
+                  <span>筛选日期</span>
+                  <strong>{stockData.date}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span>最新交易日</span>
+                  <strong>{stockData.today}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span>二筛 / 一筛</span>
+                  <strong>{secondaryStocks.length} / {allStocks.length}</strong>
+                </div>
+              </div>
+            </Card>
+
+            <Card bordered={false}>
+              <div className="module-head">
+                <div>
+                  <Typography.Title level={5} className="module-title">
+                    {stockData.date} 筛选股票列表
+                  </Typography.Title>
+                  <Typography.Text type="secondary">
+                    当前页表格和下方走势卡共用同一组股票。
+                  </Typography.Text>
+                </div>
                 <Pagination
                   current={currentPage}
                   pageSize={pageSize}
                   total={allStocks.length}
                   showSizeChanger
-                  pageSizeOptions={[5, 10, 20, 50]}
+                  pageSizeOptions={[6, 12, 18, 24]}
                   showTotal={(total, range) => `${range[0]}-${range[1]} / ${total}`}
                   onChange={(nextPage, nextPageSize) => {
                     setPage(nextPage);
@@ -289,8 +304,8 @@ export default function App() {
                     setPageSize(size);
                   }}
                 />
-              }
-            >
+              </div>
+
               <Table<PickedStock>
                 rowKey="code"
                 columns={stockColumns}
@@ -299,13 +314,18 @@ export default function App() {
                 scroll={{ x: 1680 }}
                 size="middle"
               />
-            </Card>
 
-            <Card
-              bordered={false}
-              title="当页股票走势"
-              extra={<Typography.Text type="secondary">当前页 5 只股票，从 {stockData.date} 到 {stockData.today}</Typography.Text>}
-            >
+              <div className="module-divider" />
+
+              <div className="module-subhead">
+                <Typography.Title level={5} className="module-title">
+                  当页股票走势
+                </Typography.Title>
+                <Typography.Text type="secondary">
+                  当前页 {pagedStocks.length} 只股票，从 {stockData.date} 到 {stockData.today}
+                </Typography.Text>
+              </div>
+
               {pagedStocks.length === 0 ? (
                 <Empty description="当前页没有股票数据" />
               ) : (
@@ -404,23 +424,39 @@ export default function App() {
           </Space>
         ) : view === "etf" && etfData ? (
           <Space direction="vertical" size={16} className="full-width">
-            <Row gutter={[16, 16]}>
-              <Col xs={12} md={8}>
-                <Card bordered={false}>
-                  <Statistic title="轮动日期" value={etfData.date} />
-                </Card>
-              </Col>
-              <Col xs={12} md={8}>
-                <Card bordered={false}>
-                  <Statistic title="ETF 数量" value={etfData.etfs.length} />
-                </Card>
-              </Col>
-              <Col xs={24} md={8}>
-                <Card bordered={false}>
-                  <Statistic title="本周决策" value={etfData.decision || "-"} />
-                </Card>
-              </Col>
-            </Row>
+            <Card bordered={false} className="overview-card">
+              <div className="hero">
+                <div className="hero-copy">
+                  <Typography.Title level={2}>{topTitle}</Typography.Title>
+                  <Typography.Paragraph>{topDesc}</Typography.Paragraph>
+                </div>
+                <div className="toolbar-card">
+                  <Typography.Text type="secondary">轮动日期</Typography.Text>
+                  <Select
+                    className="date-select compact"
+                    value={selectedDate || undefined}
+                    options={dates.map((date) => ({ label: date, value: date }))}
+                    onChange={(value) => setSelectedDate(value)}
+                    placeholder="选择轮动日期"
+                  />
+                </div>
+              </div>
+
+              <div className="summary-strip">
+                <div className="summary-pill">
+                  <span>轮动日期</span>
+                  <strong>{etfData.date}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span>ETF 数量</span>
+                  <strong>{etfData.etfs.length}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span>本周决策</span>
+                  <strong>{etfData.decision || "-"}</strong>
+                </div>
+              </div>
+            </Card>
 
             <Card
               bordered={false}
@@ -431,7 +467,7 @@ export default function App() {
                   pageSize={pageSize}
                   total={etfData.etfs.length}
                   showSizeChanger
-                  pageSizeOptions={[10, 20, 50, 100]}
+                  pageSizeOptions={[6, 12, 18, 24]}
                   showTotal={(total, range) => `${range[0]}-${range[1]} / ${total}`}
                   onChange={(nextPage, nextPageSize) => {
                     setPage(nextPage);
