@@ -13,6 +13,7 @@ outputs/
 .env
 .env.local
 node_modules/
+.npm-cache/
 dist/
 *.tsbuildinfo
 
