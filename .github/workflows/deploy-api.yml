@@ -1,0 +1,49 @@
+name: Deploy API
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "requirements.txt"
+      - "apps/api/**"
+      - ".github/workflows/deploy-api.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy-api:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${{ secrets.DEPLOY_PORT }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy API on server
+        shell: bash
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -p "${{ secrets.DEPLOY_PORT }}" "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" <<'EOF'
+          set -e
+          cd ~/apps/stock-quant-screener
+
+          git fetch --all
+          git reset --hard origin/main
+
+          if [ ! -d .venv ]; then
+            python3 -m venv .venv
+          fi
+
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+          .venv/bin/pip install -r apps/api/requirements.txt
+
+          sudo systemctl restart quant-screener-api
+          sudo systemctl --no-pager --full status quant-screener-api | head -n 20
+          EOF
