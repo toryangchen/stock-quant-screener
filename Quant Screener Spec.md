@@ -1,495 +1,345 @@
-
-
 # Quant Screener Spec
-面向：Codex 实现一个可跑的 Python Demo（非自动下单），用于 A 股“类量化”筛选与执行辅助  
 
-时区：Asia/Shanghai
-
-数据源默认：AkShare（免费）。要求抽象 DataSource，便于未来换 Tushare。  
-
----
-
-## 0. 目标与范围
-
-### 0.1 目标
-实现一个命令行可运行的 Demo：
-1) **ETF 轮动（每周）**：计算 ETF 池的近 20 日涨幅 + 是否站上 20 日均线，输出排名与“本周建议持仓”。  
-2) **趋势突破（每日）**：筛选 A 股候选（60日新高 + 放量 ≥ 1.5倍均量），输出候选清单。  
-3) **风控与仓位建议（必做）**：对趋势突破候选，按“单笔风险 2%”计算建议股数/金额（A股100股一手取整）+ 默认止损（-8%）。  
-4) **绩效统计（必做）**：从交易记录 trades.xlsx 读取已平仓交易，统计胜率/盈亏比/期望/连亏次数，并触发“连亏暂停交易”。  
-5) **权益曲线（必做）**：基于交易记录生成 equity_curve.csv + equity_curve.png，并计算最大回撤。  
-6) 输出到 Excel/CSV/PNG，便于人工照表执行交易。
-
-### 0.2 非目标
-- 不做券商实盘下单接口
-- 不做分钟级/高频
-- 不做复杂多因子/ML（demo 以规则为主）
-- 不做完整历史回测（可选扩展）
+面向：本项目的策略规格定义  
+时区：`Asia/Shanghai`  
+定位：收盘后数据采集、规则筛选、结果记录与跟踪；不做自动下单
 
 ---
 
-## 1. 技术栈与依赖
+## 1. 范围
 
-- Python >= 3.10
-- 依赖：
-  - akshare
-  - pandas
-  - numpy
-  - openpyxl（写 Excel）
-  - matplotlib（画权益曲线）
+项目分成两条独立策略线：
 
-安装：
+1. A 股日筛
+- 面向全市场 A 股
+- 目标是找出当日满足“趋势突破 + 放量 + 风险收益结构”条件的候选股
+- 结果写入 `screening_history`
 
-```bash
-pip install akshare pandas numpy openpyxl matplotlib
+2. ETF 周轮动
+- 面向固定 ETF 池
+- 目标是按近 20 日强弱做相对排序，并给出当周持仓建议
+- 结果写入 `etf_history`
+
+约束：
+
+- `market_cache` 只存 A 股股票，不混入 ETF
+- A 股筛选只读取本地数据库缓存，不在筛选阶段请求外部接口
+- ETF 轮动只读取 `etf_cache`
+- 两条策略线分别执行，不混跑
+
+---
+
+## 2. 数据口径
+
+### 2.1 A 股日线字段
+
+A 股筛选依赖以下字段：
+
+- `code`
+- `exchange`
+- `name`
+- `date`
+- `close`
+- `volume`
+- `low`
+- `pre_close`
+- `open`
+- `turnover`
+- `mktcap`
+
+说明：
+
+- `market_cache.data` 只保留近 60 个交易日
+- `mktcap` 存顶层，只保留最新值，不在每日 `data` 中重复存储
+
+### 2.2 ETF 日线字段
+
+ETF 轮动依赖以下字段：
+
+- `code`
+- `name`
+- `date`
+- `close`
+- `volume`
+- `low`
+
+说明：
+
+- `etf_cache.data` 至少需要覆盖 120 个交易日
+- 当前保留上限可高于 120 日，以保证轮动计算稳定
+
+---
+
+## 3. 数据表规格
+
+### 3.1 `market_cache`
+
+用途：
+
+- A 股近 60 交易日缓存
+
+约束：
+
+- `_id` 必须是 6 位股票代码
+- 只允许股票文档，不允许快照、日志、元数据混入
+
+结构：
+
+```json
+{
+  "_id": "000001",
+  "exchange": "SZ",
+  "name": "平安银行",
+  "mktcap": 209777975720.38,
+  "updated_at": "datetime",
+  "data": [
+    {
+      "date": "2026-03-06",
+      "close": 10.81,
+      "volume": 712641.18,
+      "low": 10.70,
+      "pre_close": 10.71,
+      "open": 10.72,
+      "turnover": 768553598.0
+    }
+  ]
+}
 ```
 
-------
+### 3.2 `screening_history`
 
-## **2. 项目结构（建议）**
+用途：
 
-```
-quant_screener_demo/
-  README.md
-  requirements.txt (或 pyproject.toml)
-  src/
-    main.py
-    config.py
-    data_source/
-      base.py
-      akshare_impl.py
-    logic/
-      etf_rotation.py
-      trend_breakout.py
-      risk.py
-      performance.py
-      equity_curve.py
-      filters.py
-    output/
-      writer.py
-      logger.py
-  outputs/
-    (运行生成文件)
+- 保存 A 股日筛结果
+
+约束：
+
+- `_id = [code].[run_date]`
+- 同日同股票覆盖写入
+- 保留历史日期记录，不删除历史
+
+结构示例：
+
+```json
+{
+  "_id": "000545.2026-03-06",
+  "code": "000545",
+  "run_date": "2026-03-06",
+  "is_secondary": false
+}
 ```
 
+### 3.3 `etf_cache`
 
+用途：
 
-------
+- 保存 ETF 历史日线
 
-## **3. 配置（config.py 或 config.yaml）**
+约束：
 
-### **3.1 基础配置项（必须支持覆盖）**
+- `_id = ETF代码`
 
-```
-RUN_DATE: 默认今天
-OUTPUT_DIR: ./outputs
+### 3.4 `etf_history`
 
-# ETF轮动
-ETF_POOL:
-  - {name: "沪深300", code: "510300"}
-  - {name: "创业板", code: "159915"}
-  - {name: "科创50", code: "588000"}
-  - {name: "券商",   code: "512000"}
-  - {name: "半导体", code: "512760"}
-  - {name: "军工",   code: "512660"}
-ETF_RET_WINDOW: 20
-ETF_MA_WINDOW: 20
-ETF_HISTORY_MIN_DAYS: 120
+用途：
 
-# 趋势突破（日线）
-LOOKBACK_HIGH: 60
-VOL_AVG_WINDOW: 20
-VOL_MULTIPLIER: 1.5
-MIN_HISTORY_DAYS: 200
-EXCLUDE_ST: true
+- 保存 ETF 轮动排序结果
 
-# 市值过滤（默认关闭，避免数据单位差异）
-MKT_CAP_FILTER_ENABLED: false
-MKT_CAP_MIN: 100e8
-MKT_CAP_MAX: 800e8
+约束：
 
-# 扫描性能（demo 默认只扫部分）
-SCAN_LIMIT: 500
-SLEEP_SECONDS: 0.15
+- `_id = [code].[run_date]`
+- 同日同 ETF 覆盖写入
 
-# 风控与仓位
-ACCOUNT_CAPITAL: 20000
-RISK_PER_TRADE_PCT: 0.02
-DEFAULT_STOP_LOSS_PCT: 0.08
-ROUND_LOT: 100
+---
 
-# 连亏暂停
-MAX_CONSECUTIVE_LOSSES: 3
-PAUSE_DAYS_AFTER_MAX_LOSS: 5
-```
+## 4. A 股日筛规格
 
-------
+### 4.1 股票池
 
-## **4. 数据源抽象（DataSource）**
+来源：
 
-### **4.1 接口定义（src/data_source/base.py）**
+- `market_cache`
 
-定义抽象类 DataSource，必须提供：
+前置规则：
 
-- get_a_spot() -> pd.DataFrame
-  - 返回列：code(str), name(str), mktcap(float, optional)
-- get_stock_daily(code: str) -> pd.DataFrame
-  - 返回列：date(datetime/str), close(float), volume(float)
-  - 必须按 date 升序
-- get_etf_daily(code: str) -> pd.DataFrame
-  - 返回列：date, close, volume(optional)
+- 默认排除 `ST`
+- 历史数据不足 60 个交易日的不参与
+- 若最新交易日不是目标交易日，不参与当次筛选
 
-### **4.2 AkShare 实现（src/data_source/akshare_impl.py）**
+### 4.2 初筛规则
 
-要求：
+对每只股票，以最新交易日记为 `t`，计算：
 
-- 适配 AkShare 返回中文列，统一 rename 为英文标准列：
-  - 日期 -> date
-  - 收盘 -> close
-  - 成交量 -> volume
-  - 代码 -> code
-  - 名称 -> name
-  - 总市值 -> mktcap（如存在）
-- 字段缺失时：抛出带提示的异常（提示“接口字段可能变动，需更新映射”）
-- 数据条数校验：
-  - ETF：必须 >= ETF_HISTORY_MIN_DAYS，否则标记为不可用
-  - 股票：必须 >= MIN_HISTORY_DAYS，否则跳过
-- 降级策略（必须）：
-  - 某只标的拉取失败：记录 warning，跳过，不影响整体运行
+1. 60 日新高
+- `close_t > max(close_{t-60...t-1})`
 
-------
+2. 趋势过滤
+- `close_t > MA20_t`
+- `MA20_t = mean(close_{t-20...t-1})`
 
-## **5. ETF 轮动策略（src/logic/etf_rotation.py）**
+3. 可选加强项
+- `MA5 > MA10 > MA20`
+- 默认关闭
 
-### **5.1 输入**
+4. 放量
+- `vol_ratio = volume_t / mean(volume_{t-20...t-1})`
+- 默认要求：`vol_ratio >= 1.8`
 
-- ETF_POOL（name, code）
-- 参数：RET_WINDOW=20, MA_WINDOW=20
+5. 当日强度
+- `pct_chg_t = close_t / close_{t-1} - 1`
+- 默认要求：`pct_chg_t >= 0.04`
 
-### **5.2 计算规则**
+6. 结构止损
+- `entry_price = close_t`
+- `stop_price = min(low_t, MA10_t)`
+- `risk_pct = (entry_price - stop_price) / entry_price`
+- 若 `stop_price >= entry_price`，则剔除
 
-对每个 ETF：
+初筛排序：
 
-1. 拉取日线 df，取最近至少 ETF_HISTORY_MIN_DAYS
-2. 计算：
-   - retN = close / close.shift(RET_WINDOW) - 1
-   - maN = close.rolling(MA_WINDOW).mean()
-   - above_ma = close > maN
-3. 取最后一行作为当前值
+- `vol_score = abs(vol_ratio - 3.0)`
+- 排序：`vol_score asc, code asc`
 
-### **5.3 排名与建议**
+### 4.3 二次筛选规则
 
-- 按 retN 从高到低排序
-- 建议持仓规则：
-  - 若排名第1的 above_ma = True => decision = "BUY:<name>(<code>)"
-  - 否则 => decision = "CASH"（空仓/现金）
+二筛恒定执行，不依赖初筛数量。
 
-### **5.4 输出字段（DataFrame）**
+默认规则：
 
-必须包含：
+1. 量能过滤
+- `2.0 <= vol_ratio <= 6.0`
 
-- name, code, close, retN, retN_pct, maN, above_ma, rank
+2. 风险空间过滤
+- `0.04 <= risk_pct <= 0.08`
 
-  以及：
+3. 强度过滤
+- 若存在 `pct_chg`，则要求 `pct_chg >= 0.04`
 
-- decision（仅写在单独 summary 或所有行同列亦可）
+4. 价格过滤
+- `close <= 60`
 
-------
+5. 均线乖离过滤
+- `ma20_gap = (close - ma20_price) / ma20_price`
+- 默认要求：`ma20_gap <= 0.10`
 
-## **6. 趋势突破筛选（src/logic/trend_breakout.py）**
+6. 市值过滤
+- 默认区间：`100e8 <= mktcap <= 600e8`
+- 默认缺失口径：`exclude`
 
-### **6.1 输入**
+二筛排序：
 
-- 股票快照池（get_a_spot）
-- 参数：LOOKBACK_HIGH=60, VOL_AVG_WINDOW=20, VOL_MULTIPLIER=1.5
-- 过滤项：EXCLUDE_ST
+- `score = abs(vol_ratio - 3.0) * w1 + abs(risk_pct - 0.06) * w2 + ma20_gap * w3`
+- 默认权重：
+  - `w1 = 1.0`
+  - `w2 = 20.0`
+  - `w3 = 10.0`
+- 排序：`score asc`
 
-### **6.2 股票池过滤（src/logic/filters.py）**
+输出口径：
 
-- 若 EXCLUDE_ST=true：排除 name 含 “ST” 的股票
-- 市值过滤（可选）：当 MKT_CAP_FILTER_ENABLED=true 且 mktcap 字段存在时：
-  - mktcap in [MKT_CAP_MIN, MKT_CAP_MAX]
-- Demo 扫描数量限制：
-  - 取过滤后前 SCAN_LIMIT 条（或可按成交额/市值排序取前 N）
+- 初筛命中股票全部写入 `screening_history`
+- 二筛命中的股票在同一条记录上标记 `is_secondary = true`
 
-### **6.3 单只股票信号判断**
+---
 
-对每只股票 code：
+## 5. ETF 周轮动规格
 
-1. 拉取日线 df（至少 MIN_HISTORY_DAYS，date 升序）
-2. 取最近 MIN_HISTORY_DAYS（或最近 200~300 条）
-3. 定义：
-   - today_close = df.close.iloc[-1]
-   - prev_high = max(df.close.iloc[-LOOKBACK_HIGH-1:-1])（不含今日）
-   - is_60d_high = today_close > prev_high
-   - avg_vol = mean(df.volume.iloc[-VOL_AVG_WINDOW-1:-1])
-   - vol_ratio = df.volume.iloc[-1] / avg_vol（avg_vol=0 则 NaN）
-   - vol_ok = vol_ratio >= VOL_MULTIPLIER
-4. 入选条件：
-   - is_60d_high == True AND vol_ok == True
+### 5.1 ETF 池
 
-### **6.4 输出字段（候选表）**
+当前固定池：
 
-对每个候选股输出：
+- `510300` 沪深300
+- `159915` 创业板
+- `588000` 科创50
+- `512000` 券商
+- `512760` 半导体
+- `512660` 军工
 
-- code, name
-- close
-- is_60d_high (bool)
-- vol_ratio (float, 保留2位)
-- entry_price（demo=close）
-- stop_price（默认=entry_price*(1-DEFAULT_STOP_LOSS_PCT)）
-- suggested_shares（由风控模块计算）
-- suggested_position_value（由风控模块计算）
-- note（若触发暂停交易则写“暂停交易”，否则空）
+### 5.2 轮动指标
 
-------
+对每只 ETF，以最新交易日记为 `t`：
 
-## **7. 风控与仓位建议（src/logic/risk.py）— 必做**
+1. 近 20 日涨幅
+- `ret20 = close_t / close_{t-20} - 1`
 
-### **7.1 单笔风险预算**
+2. 20 日均线
+- `ma20 = mean(close_{t-19...t})`
 
-- risk_budget = ACCOUNT_CAPITAL * RISK_PER_TRADE_PCT
+3. 是否站上 20 日均线
+- `above_ma20 = close_t > ma20`
 
-### **7.2 每股风险**
+历史要求：
 
-- risk_per_share = entry_price - stop_price
-- 若 risk_per_share <= 0：返回 suggested_shares=0，并 note 标注无效止损
+- 至少有 120 个交易日数据才参与排序
 
-### **7.3 建议股数（按 100 股一手取整）**
+### 5.3 排序与决策
 
-- raw_shares = floor(risk_budget / risk_per_share)
-- suggested_shares = floor(raw_shares / ROUND_LOT) * ROUND_LOT
-- suggested_position_value = suggested_shares * entry_price
+排序规则：
 
-### **7.4 输出**
+- 按 `ret20 desc`
 
-返回结构：
+决策规则：
 
-- risk_budget
-- risk_per_share
-- suggested_shares
-- suggested_position_value
+- 取排序第 1 名
+- 若该 ETF `above_ma20 = true`，则输出：
+  - `BUY:<name>(<code>)`
+- 否则输出：
+  - `CASH`
 
-------
+输出口径：
 
-## **8. 交易记录与绩效统计（src/logic/performance.py）— 必做**
+- 当次 ETF 池全部排序结果写入 `etf_history`
+- 每条记录保留：
+  - `code`
+  - `run_date`
+  - `rank`
+  - `ret20`
+  - `above_ma20`
+  - `decision`
 
-### **8.1 交易记录文件**
+---
 
-- 文件：outputs/trades.xlsx（若不存在则创建空模板）
+## 6. 流程边界
 
-- Sheet：Trades
+### 6.1 A 股流程
 
-- 列（必须支持中英列名映射，但推荐统一英文）：
+日流程分成两个阶段：
 
-  
+1. 数据采集阶段
+- 拉取当日全量股票日线
+- 补充最新 `mktcap`
+- 更新 `market_cache`
 
-  - trade_id（可自动生成）
-  - date_open（YYYY-MM-DD）
-  - date_close（YYYY-MM-DD，可空）
-  - symbol（code）
-  - name
-  - side（默认 LONG）
-  - entry_price
-  - exit_price（可空）
-  - shares
-  - fees（可选，默认0）
+2. 筛选阶段
+- 只读 `market_cache`
+- 执行初筛与二筛
+- 写入 `screening_history`
 
-### **8.2 平仓判定**
+补充约束：
 
-- 仅统计已平仓：date_close 非空 AND exit_price 非空
+- 若当日快照不包含今日交易日数据，则不继续执行 `mktcap` 补充与筛选
 
-### **8.3 计算字段（对每笔已平仓）**
+### 6.2 ETF 流程
 
-- pnl_amount = (exit_price - entry_price) * shares - fees
-- pnl_pct = (exit_price - entry_price) / entry_price
-- is_win = pnl_amount > 0
+周流程分成两个阶段：
 
-### **8.4 统计指标（report 必须包含）**
+1. 数据采集阶段
+- 拉取 ETF 历史日线
+- 更新 `etf_cache`
 
-- total_trades
-- win_rate = wins / total_trades
-- avg_win（仅 wins 的平均 pnl_amount）
-- avg_loss（仅 losses 的平均 pnl_amount，负数）
-- profit_factor = sum(pnl_amount>0) / abs(sum(pnl_amount<0))（若无亏损则给一个大值或 None）
-- expectancy = win_rate * avg_win + (1 - win_rate) * avg_loss
-- max_consecutive_losses（历史最大连亏）
-- current_consecutive_losses（最近连续亏损）
+2. 轮动阶段
+- 只读 `etf_cache`
+- 排序并生成当周建议
+- 写入 `etf_history`
 
-### **8.5 连亏暂停规则（必做）**
+---
 
-- 若 current_consecutive_losses >= MAX_CONSECUTIVE_LOSSES：
-  - TRADE_PAUSED = True
-  - pause_until_date = RUN_DATE + PAUSE_DAYS_AFTER_MAX_LOSS（自然日即可）
-  - 在趋势突破候选输出中 note 写 “暂停交易”
-  - 在 report 中明确提示暂停状态
+## 7. 非目标
 
-------
+当前不做：
 
-## **9. 权益曲线与最大回撤（src/logic/equity_curve.py）— 必做**
-
-### **9.1 输入**
-
-- 初始资金 ACCOUNT_CAPITAL
-- 已平仓交易列表（按 date_close 升序）
-
-### **9.2 计算**
-
-- equity_0 = ACCOUNT_CAPITAL
-- 对每个平仓日期 t：
-  - equity_t = equity_{t-1} + pnl_amount_t（同一天多笔则合并）
-- 计算峰值与回撤：
-  - peak_t = max(peak_{t-1}, equity_t)
-  - drawdown_t = (equity_t - peak_t) / peak_t
-- max_drawdown = min(drawdown_t)
-
-### **9.3 输出文件（必做）**
-
-- outputs/equity_curve.csv：date, equity, drawdown
-- outputs/equity_curve.png：一张图（date vs equity），用 matplotlib 画，默认样式即可
-- max_drawdown 写入 report
-
-------
-
-## **10. 输出（src/output/writer.py）— 必做**
-
-### **10.1 输出目录**
-
-- 若 OUTPUT_DIR 不存在则创建
-
-### **10.2 生成文件清单（每次运行尽量覆盖写入）**
-
-- etf_rotation_rank.xlsx（含排名与 decision）
-- etf_rotation_rank.csv
-- trend_breakout_candidates.xlsx（含风控列）
-- trend_breakout_candidates.csv
-- trades.xlsx（若不存在则生成模板；若存在则不覆盖用户数据，只读取）
-- report.xlsx（统计汇总 + 暂停信号 + max_drawdown）
-- report.json（同上，便于程序读取）
-- equity_curve.csv
-- equity_curve.png
-
-### **10.3 Excel 表结构建议**
-
-- etf_rotation_rank.xlsx：Sheet Rank
-- trend_breakout_candidates.xlsx：Sheet Candidates
-- report.xlsx：Sheet Summary + Stats + Notes（可简化为一个）
-
-------
-
-## **11. CLI（src/main.py）— 必做**
-
-### **11.1 命令**
-
-- python -m src.main etf
-- python -m src.main breakout
-- python -m src.main all
-
-### **11.2 参数**
-
-- --output-dir
-- --scan-limit
-- --risk-per-trade（覆盖配置 RISK_PER_TRADE_PCT）
-- --sleep（覆盖 SLEEP_SECONDS）
-
-### **11.3 返回码**
-
-- 成功：0
-- 关键失败（例如依赖缺失、输出目录不可写）：非0
-
-------
-
-## **12. 日志与错误处理（src/output/logger.py）— 必做**
-
-- 使用 Python logging
-
-- 日志级别：
-
-  
-
-  - INFO：开始/结束、总数、输出文件路径
-  - WARNING：单只标的拉取失败、字段缺失跳过
-  - ERROR：关键模块失败（例如 DataSource 初始化失败）
-
-  
-
-- 失败策略：
-
-  
-
-  - 单只标的失败不影响整体
-  - 任何一个模块失败应给出清晰错误信息
-
-------
-
-## **13. Demo 运行流程（all）**
-
-python -m src.main all 需按顺序执行：
-
-1. load config
-2. init DataSource(AkShare)
-3. run ETF rotation -> write outputs
-4. run breakout candidates -> apply risk sizing -> write outputs
-5. ensure trades.xlsx exists (create template if missing)
-6. read trades.xlsx -> performance stats + pause logic -> write report
-7. build equity curve + drawdown -> write csv/png + write report fields
-8. 若 pause 触发：在 candidates 输出中写 note=暂停交易（覆盖写入 candidates 文件）
-
-------
-
-## **14. 验收标准（Acceptance Criteria）**
-
-1. etf 命令能生成 ETF 排名表（xlsx+csv）并给出 decision
-
-2. breakout 命令能生成候选清单（xlsx+csv），包含：
-
-   
-
-   - is_60d_high=true
-   - vol_ratio>=1.5
-   - stop_price=entry*(1-0.08)
-   - suggested_shares 按 2% 风险计算并按 100 取整
-
-   
-
-3. all 命令能额外生成：
-
-   
-
-   - trades.xlsx（若不存在）
-   - report.xlsx + report.json（含胜率、盈亏比、期望、连亏、暂停信号、最大回撤）
-   - equity_curve.csv + equity_curve.png
-
-   
-
-4. 当 trades.xlsx 中存在连续亏损 >= 3 笔时：
-
-   
-
-   - report 标记暂停
-   - candidates 的 note 标记暂停交易
-
-   
-
-------
-
-## **15. 可选增强（非必须，写 TODO）**
-
-- 多线程/异步拉取日线提升速度
-- 限定股票池为沪深300/中证500成分
-- 加入指数过滤（如沪深300站上MA20才允许做突破）
-- 加入交易费用模型（印花税/佣金/过户费）
-
-------
-
-## **16. 备注（重要）**
-
-- 数据源 AkShare 可能存在字段调整/限流/偶发失败，因此必须实现列映射与降级策略。
-- Demo 阶段 entry_price=close 是近似；未来可扩展为“次日开盘价”。
-
-
-
-```
-如果你想让 Codex 更顺滑地一次性跑通，我建议你再补一句“实现优先级”给它：  
-**先把 `all` 跑通并产出所有 outputs，再做字段美化/性能优化。**
-```
+- 自动下单
+- 分钟级交易策略
+- 多因子打分框架
+- 回测系统
+- 风控执行引擎
