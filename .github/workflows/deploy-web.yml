@@ -34,7 +34,7 @@ jobs:
       - name: Build web
         env:
           VITE_BASE_PATH: /quant-screener/
-          VITE_API_BASE: /quant-screener/api
+          VITE_API_BASE: /quant-screener
         run: npm run build
 
       - name: Setup SSH key
