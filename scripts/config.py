@@ -38,7 +38,7 @@ class AppConfig:
     mkt_cap_max: float = 800e8
 
     scan_limit: int = 0
-    sleep_seconds: float = 0.15
+    sleep_seconds: float = 0.0
 
     secondary_vol_min: float = 2.0
     secondary_vol_max: float = 6.0
