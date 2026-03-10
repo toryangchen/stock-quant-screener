@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ColumnsType } from "antd/es/table";
+import { QuestionCircleOutlined } from "@ant-design/icons";
 import {
   Alert,
   Card,
   Empty,
   Menu,
   Pagination,
+  Popover,
   Select,
   Space,
   Spin,
@@ -28,6 +30,18 @@ import type { EtfPick, EtfResponse, PickedStock, ScreeningResponse } from "./typ
 
 const STOCK_DEFAULT_PAGE_SIZE = 6;
 const ETF_DEFAULT_PAGE_SIZE = 6;
+const PRIMARY_RULES = [
+  "近 60 日收盘突破前高",
+  "收盘站上 MA20",
+  "当日涨幅不低于 4%",
+  "量比不低于 1.8",
+];
+const SECONDARY_RULES = [
+  "量比控制在 2 到 6 倍",
+  "止损风险控制在 4% 到 8%",
+  "股价不高于 60 元",
+  "距 MA20 不超过 10%，再按评分排序",
+];
 
 function pctTone(value: number) {
   return value >= 0 ? "up" : "down";
@@ -48,6 +62,30 @@ function formatShortDate(value: string) {
 
 function getTonghuashunUrl(code: string) {
   return `https://stockpage.10jqka.com.cn/${code}/`;
+}
+
+function RuleBubble({ title, items }: { title: string; items: string[] }) {
+  return (
+    <Popover
+      trigger="hover"
+      placement="bottomRight"
+      overlayClassName="logic-popover"
+      content={
+        <div className="logic-bubble">
+          <strong>{title}</strong>
+          <ul>
+            {items.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      }
+    >
+      <span className="logic-help" aria-label={`${title}说明`}>
+        <QuestionCircleOutlined />
+      </span>
+    </Popover>
+  );
 }
 
 export default function App() {
@@ -264,15 +302,25 @@ export default function App() {
 
               <div className="summary-strip">
                 <div className="summary-pill">
-                  <span>筛选日期</span>
+                  <span className="summary-title">筛选日期</span>
                   <strong>{stockData.date}</strong>
                 </div>
                 <div className="summary-pill">
-                  <span>最新交易日</span>
+                  <span className="summary-title">最新交易日</span>
                   <strong>{stockData.today}</strong>
                 </div>
                 <div className="summary-pill">
-                  <span>二筛 / 一筛</span>
+                  <span className="summary-label-with-help">
+                    <span className="logic-inline-item">
+                      二筛
+                      <RuleBubble title="二筛逻辑" items={SECONDARY_RULES} />
+                    </span>
+                    <span className="logic-slash">/</span>
+                    <span className="logic-inline-item">
+                      一筛
+                      <RuleBubble title="一筛逻辑" items={PRIMARY_RULES} />
+                    </span>
+                  </span>
                   <strong>{secondaryStocks.length} / {allStocks.length}</strong>
                 </div>
               </div>
@@ -444,15 +492,15 @@ export default function App() {
 
               <div className="summary-strip">
                 <div className="summary-pill">
-                  <span>轮动日期</span>
+                  <span className="summary-title">轮动日期</span>
                   <strong>{etfData.date}</strong>
                 </div>
                 <div className="summary-pill">
-                  <span>ETF 数量</span>
+                  <span className="summary-title">ETF 数量</span>
                   <strong>{etfData.etfs.length}</strong>
                 </div>
                 <div className="summary-pill">
-                  <span>本周决策</span>
+                  <span className="summary-title">本周决策</span>
                   <strong>{etfData.decision || "-"}</strong>
                 </div>
               </div>

@@ -108,22 +108,104 @@ body {
 }
 
 .summary-pill {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
   padding: 10px 12px;
   border-radius: 12px;
   background: linear-gradient(180deg, #fbfefd, #f4f8f7);
   border: 1px solid #e6eef4;
 }
 
-.summary-pill span {
+.summary-pill .summary-title {
   display: block;
+  min-height: 16px;
   color: #64748b;
   font-size: 12px;
   margin-bottom: 4px;
+  line-height: 16px;
 }
 
 .summary-pill strong {
   font-size: 18px;
   line-height: 1.2;
+}
+
+.summary-pill .summary-label-with-help {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-height: 16px;
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.summary-pill .logic-inline-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.summary-pill .logic-slash {
+  display: inline;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.summary-pill .logic-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.18s ease, transform 0.18s ease;
+  vertical-align: middle;
+}
+
+.logic-help:hover {
+  color: #0f766e;
+  transform: translateY(-1px);
+}
+
+.logic-help .anticon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.logic-bubble {
+  max-width: 280px;
+}
+
+.logic-bubble strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #0f172a;
+}
+
+.logic-bubble ul {
+  margin: 0;
+  padding-left: 16px;
+  color: #475569;
+}
+
+.logic-bubble li + li {
+  margin-top: 6px;
 }
 
 .module-head {
