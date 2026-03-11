@@ -15,18 +15,8 @@ import {
   Tag,
   Typography,
 } from "antd";
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  Line,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { fetchDates, fetchEtf, fetchEtfDates, fetchScreening } from "./api";
-import type { EtfPick, EtfResponse, PickedStock, ScreeningResponse } from "./types";
+import type { EtfPick, EtfResponse, PickedStock, ScreeningResponse, TrendPoint } from "./types";
 
 const STOCK_DEFAULT_PAGE_SIZE = 6;
 const ETF_DEFAULT_PAGE_SIZE = 6;
@@ -60,8 +50,128 @@ function formatShortDate(value: string) {
   return value.slice(5);
 }
 
+function formatAxisDate(value: string) {
+  if (!value || value.length < 10) return value;
+  const month = String(Number(value.slice(5, 7)));
+  const day = String(Number(value.slice(8, 10)));
+  return `${month}.${day}`;
+}
+
 function getTonghuashunUrl(code: string) {
   return `https://stockpage.10jqka.com.cn/${code}/`;
+}
+
+function renderPrice(value?: number) {
+  return typeof value === "number" ? value.toFixed(2) : "-";
+}
+
+function CandlestickChart({ points }: { points: TrendPoint[] }) {
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const width = 560;
+  const height = 220;
+  const margin = { top: 12, right: 14, bottom: 30, left: 40 };
+
+  if (points.length === 0) {
+    return <div className="candle-empty">暂无走势数据</div>;
+  }
+
+  const highs = points.map((point) => point.high);
+  const lows = points.map((point) => point.low);
+  const rawMin = Math.min(...lows);
+  const rawMax = Math.max(...highs);
+  const priceSpan = Math.max(rawMax - rawMin, 0.5);
+  const yMin = rawMin - priceSpan * 0.08;
+  const yMax = rawMax + priceSpan * 0.08;
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const xStep = points.length > 1 ? plotWidth / (points.length - 1) : 0;
+  const candleWidth = Math.max(6, Math.min(14, plotWidth / Math.max(points.length * 1.8, 1)));
+  const gridValues = Array.from({ length: 4 }, (_, index) => yMin + ((yMax - yMin) / 3) * index).reverse();
+  const tickIndexes =
+    points.length <= 8
+      ? points.map((_, index) => index)
+      : Array.from(new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])).filter(
+          (index) => index >= 0
+        );
+
+  const getX = (index: number) => margin.left + (points.length === 1 ? plotWidth / 2 : index * xStep);
+  const getY = (value: number) => margin.top + ((yMax - value) / (yMax - yMin)) * plotHeight;
+  const hoveredPoint = hoveredIndex === null ? null : points[hoveredIndex];
+
+  return (
+    <div className="candle-chart" onMouseLeave={() => setHoveredIndex(null)}>
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="股票蜡烛图走势">
+        {gridValues.map((value) => {
+          const y = getY(value);
+          return (
+            <g key={value}>
+              <line x1={margin.left} x2={width - margin.right} y1={y} y2={y} stroke="#e7eef5" strokeDasharray="2 4" />
+              <text x={margin.left - 8} y={y + 4} textAnchor="end" className="candle-axis-label">
+                {value.toFixed(2)}
+              </text>
+            </g>
+          );
+        })}
+
+        {points.map((point, index) => {
+          const x = getX(index);
+          const yHigh = getY(point.high);
+          const yLow = getY(point.low);
+          const yOpen = getY(point.open);
+          const yClose = getY(point.close);
+          const bodyTop = Math.min(yOpen, yClose);
+          const bodyHeight = Math.max(Math.abs(yOpen - yClose), 2);
+          const isUp = point.close >= point.open;
+          const stroke = isUp ? "#cf1322" : "#08979c";
+          const fill = isUp ? "#cf1322" : "#ffffff";
+          return (
+            <g key={`${point.date}-${index}`} onMouseEnter={() => setHoveredIndex(index)} className="candle-node">
+              <line x1={x} x2={x} y1={yHigh} y2={yLow} stroke={stroke} strokeWidth={1.5} />
+              <rect
+                x={x - candleWidth / 2}
+                y={bodyTop}
+                width={candleWidth}
+                height={bodyHeight}
+                rx={2}
+                fill={fill}
+                stroke={stroke}
+                strokeWidth={1.5}
+              />
+              <rect
+                x={x - Math.max(candleWidth, 10)}
+                y={margin.top}
+                width={Math.max(candleWidth * 2, 20)}
+                height={plotHeight}
+                fill="transparent"
+              />
+            </g>
+          );
+        })}
+
+        {tickIndexes.map((index) => (
+          <text
+            key={`tick-${index}`}
+            x={index === 0 ? margin.left : index === points.length - 1 ? width - margin.right : getX(index)}
+            y={height - 8}
+            textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"}
+            className="candle-axis-label"
+          >
+            {formatAxisDate(points[index].date)}
+          </text>
+        ))}
+      </svg>
+
+      {hoveredPoint ? (
+        <div className="candle-tooltip">
+          <strong>{hoveredPoint.date}</strong>
+          <div>开盘 {renderPrice(hoveredPoint.open)}</div>
+          <div>最高 {renderPrice(hoveredPoint.high)}</div>
+          <div>最低 {renderPrice(hoveredPoint.low)}</div>
+          <div>收盘 {renderPrice(hoveredPoint.close)}</div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function RuleBubble({ title, items }: { title: string; items: string[] }) {
@@ -381,7 +491,9 @@ export default function App() {
                   {pagedStocks.map((stock, idx) => {
                     const trend = trendMap.get(stock.code);
                     if (!trend) return null;
-                    const tone = `hsl(${(idx * 47) % 360}, 72%, 42%)`;
+                    const latestPoint = trend.points[trend.points.length - 1];
+                    const dayHigh = latestPoint?.high ?? latestPoint?.open ?? latestPoint?.close;
+                    const dayLow = latestPoint?.low ?? latestPoint?.open ?? latestPoint?.close;
                     return (
                       <article className="trend-card" key={stock.code}>
                         <div className="trend-head">
@@ -414,55 +526,17 @@ export default function App() {
                             <span>20日涨幅</span>
                             <strong className={pctTone(stock.ret_20_stock)}>{stock.ret_20_stock.toFixed(2)}%</strong>
                           </div>
+                          <div>
+                            <span>当日最高</span>
+                            <strong>{renderPrice(dayHigh)}</strong>
+                          </div>
+                          <div>
+                            <span>当日最低</span>
+                            <strong>{renderPrice(dayLow)}</strong>
+                          </div>
                         </div>
 
-                        <ResponsiveContainer width="100%" height={220}>
-                          <AreaChart data={trend.points} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
-                            <defs>
-                              <linearGradient id={`trend-fill-${stock.code}`} x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="0%" stopColor={tone} stopOpacity={0.22} />
-                                <stop offset="100%" stopColor={tone} stopOpacity={0.02} />
-                              </linearGradient>
-                            </defs>
-                            <CartesianGrid stroke="#e7eef5" strokeDasharray="2 4" vertical={false} />
-                            <XAxis
-                              dataKey="date"
-                              tickFormatter={formatShortDate}
-                              tick={{ fontSize: 11, fill: "#64748b" }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <YAxis
-                              domain={["auto", "auto"]}
-                              tick={{ fontSize: 11, fill: "#64748b" }}
-                              axisLine={false}
-                              tickLine={false}
-                              width={42}
-                            />
-                            <Tooltip
-                              formatter={(value: number) => [`${Number(value).toFixed(2)}`, "收盘价"]}
-                              labelFormatter={(label) => `日期 ${label}`}
-                              contentStyle={{
-                                borderRadius: 12,
-                                border: "1px solid #dbe4f0",
-                                boxShadow: "0 10px 30px rgba(15,23,42,0.08)",
-                              }}
-                            />
-                            <Area
-                              type="monotone"
-                              dataKey="close"
-                              stroke="none"
-                              fill={`url(#trend-fill-${stock.code})`}
-                            />
-                            <Line
-                              type="monotone"
-                              dataKey="close"
-                              stroke={tone}
-                              dot={false}
-                              strokeWidth={2.5}
-                            />
-                          </AreaChart>
-                        </ResponsiveContainer>
+                        <CandlestickChart points={trend.points} />
                       </article>
                     );
                   })}
