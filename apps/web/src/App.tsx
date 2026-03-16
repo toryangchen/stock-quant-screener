@@ -15,8 +15,16 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { fetchDates, fetchEtf, fetchEtfDates, fetchScreening } from "./api";
-import type { EtfPick, EtfResponse, PickedStock, ScreeningResponse, TrendPoint } from "./types";
+import { fetchAnalysis, fetchAnalysisDates, fetchDates, fetchEtf, fetchEtfDates, fetchScreening } from "./api";
+import type {
+  AnalysisResponse,
+  AnalysisStock,
+  EtfPick,
+  EtfResponse,
+  PickedStock,
+  ScreeningResponse,
+  TrendPoint,
+} from "./types";
 
 const STOCK_DEFAULT_PAGE_SIZE = 6;
 const ETF_DEFAULT_PAGE_SIZE = 6;
@@ -97,6 +105,9 @@ function CandlestickChart({ points }: { points: TrendPoint[] }) {
   const getX = (index: number) => margin.left + (points.length === 1 ? plotWidth / 2 : index * xStep);
   const getY = (value: number) => margin.top + ((yMax - value) / (yMax - yMin)) * plotHeight;
   const hoveredPoint = hoveredIndex === null ? null : points[hoveredIndex];
+  const closeLinePath = points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${getX(index)} ${getY(point.close)}`)
+    .join(" ");
 
   return (
     <div className="candle-chart" onMouseLeave={() => setHoveredIndex(null)}>
@@ -147,6 +158,18 @@ function CandlestickChart({ points }: { points: TrendPoint[] }) {
             </g>
           );
         })}
+
+        <path d={closeLinePath} className="close-line" />
+
+        {points.map((point, index) => (
+          <circle
+            key={`close-point-${point.date}-${index}`}
+            cx={getX(index)}
+            cy={getY(point.close)}
+            r={hoveredIndex === index ? 3.5 : 2.5}
+            className="close-line-dot"
+          />
+        ))}
 
         {tickIndexes.map((index) => (
           <text
@@ -199,17 +222,18 @@ function RuleBubble({ title, items }: { title: string; items: string[] }) {
 }
 
 export default function App() {
-  const [view, setView] = useState<"stocks" | "etf">("stocks");
+  const [view, setView] = useState<"stocks" | "analysis" | "etf">("stocks");
   const [dates, setDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [stockData, setStockData] = useState<ScreeningResponse | null>(null);
+  const [analysisData, setAnalysisData] = useState<AnalysisResponse | null>(null);
   const [etfData, setEtfData] = useState<EtfResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(STOCK_DEFAULT_PAGE_SIZE);
 
-  const defaultPageSize = view === "stocks" ? STOCK_DEFAULT_PAGE_SIZE : ETF_DEFAULT_PAGE_SIZE;
+  const defaultPageSize = view === "etf" ? ETF_DEFAULT_PAGE_SIZE : STOCK_DEFAULT_PAGE_SIZE;
 
   useEffect(() => {
     let mounted = true;
@@ -220,7 +244,7 @@ export default function App() {
     setPage(1);
     setPageSize(defaultPageSize);
 
-    const loader = view === "stocks" ? fetchDates : fetchEtfDates;
+    const loader = view === "stocks" ? fetchDates : view === "analysis" ? fetchAnalysisDates : fetchEtfDates;
     loader()
       .then((res) => {
         if (!mounted) return;
@@ -249,12 +273,19 @@ export default function App() {
     setPage(1);
     setPageSize(defaultPageSize);
 
-    const request = view === "stocks" ? fetchScreening(selectedDate) : fetchEtf(selectedDate);
+    const request =
+      view === "stocks"
+        ? fetchScreening(selectedDate)
+        : view === "analysis"
+          ? fetchAnalysis(selectedDate)
+          : fetchEtf(selectedDate);
     request
       .then((res) => {
         if (!mounted) return;
         if (view === "stocks") {
           setStockData(res as ScreeningResponse);
+        } else if (view === "analysis") {
+          setAnalysisData(res as AnalysisResponse);
         } else {
           setEtfData(res as EtfResponse);
         }
@@ -274,19 +305,23 @@ export default function App() {
   }, [selectedDate, view, defaultPageSize]);
 
   const allStocks = stockData?.primary_stocks ?? stockData?.stocks ?? [];
+  const analysisStocks = analysisData?.stocks ?? [];
   const secondaryStocks =
     stockData?.secondary_stocks ?? stockData?.stocks?.filter((item) => item.is_secondary !== false) ?? [];
+  const analysisUpCount = analysisStocks.filter((item) => item.return_pct > 0).length;
+  const analysisDownCount = analysisStocks.filter((item) => item.return_pct < 0).length;
+  const analysisFlatCount = analysisStocks.filter((item) => item.return_pct === 0).length;
 
   const trendMap = useMemo(() => {
     const map = new Map<string, ScreeningResponse["trends"][number]>();
-    if (!stockData) return map;
-    for (const item of stockData.trends) {
+    const trends = view === "analysis" ? analysisData?.trends ?? [] : stockData?.trends ?? [];
+    for (const item of trends) {
       map.set(item.code, item);
     }
     return map;
-  }, [stockData]);
+  }, [analysisData, stockData, view]);
 
-  const currentItems = view === "stocks" ? allStocks : (etfData?.etfs ?? []);
+  const currentItems = view === "stocks" ? allStocks : view === "analysis" ? analysisStocks : (etfData?.etfs ?? []);
   const totalPages = Math.max(1, Math.ceil(currentItems.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pagedStocks = useMemo(() => {
@@ -297,6 +332,10 @@ export default function App() {
     const start = (currentPage - 1) * pageSize;
     return (etfData?.etfs ?? []).slice(start, start + pageSize);
   }, [etfData, currentPage, pageSize]);
+  const pagedAnalysisStocks = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return analysisStocks.slice(start, start + pageSize);
+  }, [analysisStocks, currentPage, pageSize]);
 
   const stockColumns = useMemo<ColumnsType<PickedStock>>(
     () => [
@@ -368,10 +407,47 @@ export default function App() {
     []
   );
 
-  const topTitle = view === "stocks" ? "A股日筛复盘面板" : "ETF 周轮动决策面板";
+  const analysisColumns = useMemo<ColumnsType<AnalysisStock>>(
+    () => [
+      {
+        title: "代码",
+        dataIndex: "code",
+        key: "code",
+        width: 108,
+        fixed: "left",
+        render: (value: string) => (
+          <a href={getTonghuashunUrl(value)} target="_blank" rel="noreferrer">
+            {value}
+          </a>
+        ),
+      },
+      {
+        title: "名称",
+        dataIndex: "name",
+        key: "name",
+        width: 120,
+        fixed: "left",
+        render: (_: string, record: AnalysisStock) => (
+          <a href={getTonghuashunUrl(record.code)} target="_blank" rel="noreferrer">
+            {record.name}
+          </a>
+        ),
+      },
+      { title: "加入价", dataIndex: "entry_price", key: "entry_price", width: 96, render: (value: number) => value.toFixed(2) },
+      { title: "最新价", dataIndex: "latest_price", key: "latest_price", width: 96, render: (value: number) => value.toFixed(2) },
+      { title: "区间收益", dataIndex: "return_pct", key: "return_pct", width: 108, render: renderPercent },
+      { title: "加入时涨幅", dataIndex: "pct_chg", key: "pct_chg", width: 110, render: renderPercent },
+      { title: "来源文件", dataIndex: "source_file", key: "source_file", width: 120 },
+    ],
+    []
+  );
+
+  const topTitle = view === "stocks" ? "A股日筛复盘面板" : view === "analysis" ? "股票观察池面板" : "ETF 周轮动决策面板";
   const topDesc =
     view === "stocks"
       ? "按筛选日期回看一筛全量名单，快速识别进入二筛的标的，并观察二筛股票后续价格走势。"
+      : view === "analysis"
+        ? "按加入日期查看盘中观察股票，并回看该股票自加入日至当前交易日的日线走势。"
       : "按周查看 ETF 强弱排序、均线站位和当周建议持仓，用于轮动决策复盘。";
 
   return (
@@ -382,9 +458,10 @@ export default function App() {
         selectedKeys={[view]}
         items={[
           { key: "stocks", label: "股票筛选" },
+          { key: "analysis", label: "股票观察池" },
           { key: "etf", label: "ETF 周轮动" },
         ]}
-        onClick={({ key }) => setView(key as "stocks" | "etf")}
+        onClick={({ key }) => setView(key as "stocks" | "analysis" | "etf")}
       />
 
       {error && <Alert className="block-gap" type="error" message={error} showIcon />}
@@ -525,6 +602,156 @@ export default function App() {
                           <div>
                             <span>20日涨幅</span>
                             <strong className={pctTone(stock.ret_20_stock)}>{stock.ret_20_stock.toFixed(2)}%</strong>
+                          </div>
+                          <div>
+                            <span>当日最高</span>
+                            <strong>{renderPrice(dayHigh)}</strong>
+                          </div>
+                          <div>
+                            <span>当日最低</span>
+                            <strong>{renderPrice(dayLow)}</strong>
+                          </div>
+                        </div>
+
+                        <CandlestickChart points={trend.points} />
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          </Space>
+        ) : view === "analysis" && analysisData ? (
+          <Space direction="vertical" size={16} className="full-width">
+            <Card bordered={false} className="overview-card">
+              <div className="hero">
+                <div className="hero-copy">
+                  <Typography.Title level={2}>{topTitle}</Typography.Title>
+                  <Typography.Paragraph>{topDesc}</Typography.Paragraph>
+                </div>
+                <div className="toolbar-card">
+                  <Typography.Text type="secondary">加入日期</Typography.Text>
+                  <Select
+                    className="date-select compact"
+                    value={selectedDate || undefined}
+                    options={dates.map((date) => ({ label: date, value: date }))}
+                    onChange={(value) => setSelectedDate(value)}
+                    placeholder="选择加入日期"
+                  />
+                </div>
+              </div>
+
+              <div className="summary-strip analysis-summary-strip">
+                <div className="summary-pill">
+                  <span className="summary-title">加入日期</span>
+                  <strong>{analysisData.date}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span className="summary-title">最新交易日</span>
+                  <strong>{analysisData.today}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span className="summary-title">股票数量</span>
+                  <strong>{analysisData.stocks.length}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span className="summary-title">区间收益涨跌比</span>
+                  <strong className="summary-detail-text">
+                    上涨 {analysisUpCount} / 下跌 {analysisDownCount} / 持平 {analysisFlatCount}
+                  </strong>
+                </div>
+              </div>
+            </Card>
+
+            <Card bordered={false}>
+              <div className="module-head">
+                <div>
+                  <Typography.Title level={5} className="module-title">
+                    {analysisData.date} 分析股票列表
+                  </Typography.Title>
+                  <Typography.Text type="secondary">
+                    表格和下方走势卡共用同一页股票，收益按加入时价格计算。
+                  </Typography.Text>
+                </div>
+                <Pagination
+                  current={currentPage}
+                  pageSize={pageSize}
+                  total={analysisStocks.length}
+                  showSizeChanger
+                  pageSizeOptions={[6, 12, 18, 24]}
+                  showTotal={(total, range) => `${range[0]}-${range[1]} / ${total}`}
+                  onChange={(nextPage, nextPageSize) => {
+                    setPage(nextPage);
+                    setPageSize(nextPageSize);
+                  }}
+                  onShowSizeChange={(_, size) => {
+                    setPage(1);
+                    setPageSize(size);
+                  }}
+                />
+              </div>
+
+              <Table<AnalysisStock>
+                rowKey="code"
+                columns={analysisColumns}
+                dataSource={pagedAnalysisStocks}
+                pagination={false}
+                scroll={{ x: 980 }}
+                size="middle"
+              />
+
+              <div className="module-divider" />
+
+              <div className="module-subhead">
+                <Typography.Title level={5} className="module-title">
+                  当页股票走势
+                </Typography.Title>
+                <Typography.Text type="secondary">
+                  当前页 {pagedAnalysisStocks.length} 只股票，从 {analysisData.date} 到 {analysisData.today}
+                </Typography.Text>
+              </div>
+
+              {pagedAnalysisStocks.length === 0 ? (
+                <Empty description="当前页没有分析股票数据" />
+              ) : (
+                <div className="trend-grid">
+                  {pagedAnalysisStocks.map((stock) => {
+                    const trend = trendMap.get(stock.code);
+                    if (!trend) return null;
+                    const latestPoint = trend.points[trend.points.length - 1];
+                    const dayHigh = latestPoint?.high ?? latestPoint?.open ?? latestPoint?.close;
+                    const dayLow = latestPoint?.low ?? latestPoint?.open ?? latestPoint?.close;
+                    return (
+                      <article className="trend-card" key={stock.code}>
+                        <div className="trend-head">
+                          <div>
+                            <strong>{stock.name}</strong>
+                            <div className="trend-meta">
+                              <span>{stock.code}</span>
+                              <Tag color="gold">观察池</Tag>
+                            </div>
+                          </div>
+                          <div className="trend-stats">
+                            <span className={pctTone(stock.return_pct)}>
+                              {stock.return_pct >= 0 ? "+" : ""}
+                              {stock.return_pct.toFixed(2)}%
+                            </span>
+                            <small>区间收益</small>
+                          </div>
+                        </div>
+
+                        <div className="trend-summary">
+                          <div>
+                            <span>加入价</span>
+                            <strong>{stock.entry_price.toFixed(2)}</strong>
+                          </div>
+                          <div>
+                            <span>最新价</span>
+                            <strong>{stock.latest_price.toFixed(2)}</strong>
+                          </div>
+                          <div>
+                            <span>加入时涨幅</span>
+                            <strong className={pctTone(stock.pct_chg)}>{stock.pct_chg.toFixed(2)}%</strong>
                           </div>
                           <div>
                             <span>当日最高</span>

@@ -58,3 +58,20 @@ export type EtfResponse = {
   decision: string;
   etfs: EtfPick[];
 };
+
+export type AnalysisStock = {
+  code: string;
+  name: string;
+  entry_price: number;
+  latest_price: number;
+  return_pct: number;
+  pct_chg: number;
+  source_file: string;
+};
+
+export type AnalysisResponse = {
+  date: string;
+  today: string;
+  stocks: AnalysisStock[];
+  trends: StockTrend[];
+};

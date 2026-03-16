@@ -107,6 +107,10 @@ body {
   gap: 10px;
 }
 
+.analysis-summary-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .summary-pill {
   display: flex;
   flex-direction: column;
@@ -129,6 +133,12 @@ body {
 .summary-pill strong {
   font-size: 18px;
   line-height: 1.2;
+}
+
+.summary-pill .summary-detail-text {
+  font-size: 18px;
+  line-height: 1.2;
+  font-weight: 600;
 }
 
 .summary-pill .summary-label-with-help {
@@ -355,6 +365,21 @@ body {
   cursor: pointer;
 }
 
+.close-line {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.92;
+}
+
+.close-line-dot {
+  fill: #2563eb;
+  stroke: rgba(255, 255, 255, 0.9);
+  stroke-width: 1.2;
+}
+
 .candle-tooltip {
   position: absolute;
   top: 8px;
@@ -439,6 +464,10 @@ body {
   }
 
   .summary-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .analysis-summary-strip {
     grid-template-columns: 1fr;
   }
 

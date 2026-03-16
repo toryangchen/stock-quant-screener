@@ -27,6 +27,9 @@ class QuantReadService:
     def get_etf_dates(self) -> dict[str, list[str]]:
         return {"dates": self.repo.get_etf_dates()}
 
+    def get_analysis_dates(self) -> dict[str, list[str]]:
+        return {"dates": self.repo.get_analysis_dates()}
+
     def get_screening_by_date(self, run_date: str) -> dict[str, Any]:
         docs = self.repo.get_screening_docs(run_date)
         if not docs:
@@ -97,6 +100,54 @@ class QuantReadService:
             )
 
         return {"date": run_date, "decision": decision, "etfs": etfs}
+
+    def get_analysis_by_date(self, run_date: str) -> dict[str, Any]:
+        docs = self.repo.get_analysis_docs(run_date)
+        if not docs:
+            raise HTTPException(status_code=404, detail=f"analysis date not found: {run_date}")
+
+        codes = [str(doc.get("code", "")).strip() for doc in docs if str(doc.get("code", "")).strip()]
+        market_map = self.repo.get_market_docs_by_codes(codes)
+
+        stocks: list[dict[str, Any]] = []
+        trends: list[dict[str, Any]] = []
+        latest_dates: list[str] = []
+
+        for doc in docs:
+            code = str(doc.get("code", "")).strip()
+            if not code:
+                continue
+
+            market_doc = market_map.get(code, {})
+            points = build_points(list(market_doc.get("data") or []), run_date)
+            if points:
+                latest_dates.append(points[-1]["date"])
+
+            entry_price = to_float(doc.get("entry_price")) or 0.0
+            latest_price = to_float(points[-1]["close"] if points else None)
+            if latest_price is None:
+                latest_price = entry_price
+
+            return_pct = 0.0
+            if entry_price:
+                return_pct = round((latest_price - entry_price) / entry_price * 100, 2)
+
+            name = str(doc.get("name") or market_doc.get("name") or code)
+            stocks.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "entry_price": round(entry_price, 2),
+                    "latest_price": round(latest_price, 2),
+                    "return_pct": return_pct,
+                    "pct_chg": round(to_float(doc.get("pct_chg")) or 0.0, 2),
+                    "source_file": str(doc.get("source_file") or ""),
+                }
+            )
+            trends.append({"code": code, "name": name, "points": points})
+
+        today = max(latest_dates) if latest_dates else run_date
+        return {"date": run_date, "today": today, "stocks": stocks, "trends": trends}
 
     def _build_stock_pick(self, doc: dict[str, Any], market_doc: dict[str, Any]) -> dict[str, Any]:
         entry_price = to_float(doc.get("entry_price"))

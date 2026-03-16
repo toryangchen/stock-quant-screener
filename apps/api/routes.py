@@ -32,3 +32,13 @@ def etf_dates():
 @router.get("/api/etf")
 def etf_by_date(run_date: str = Query(..., description="YYYY-MM-DD")):
     return service.get_etf_by_date(run_date)
+
+
+@router.get("/api/analysis/dates")
+def analysis_dates():
+    return service.get_analysis_dates()
+
+
+@router.get("/api/analysis")
+def analysis_by_date(run_date: str = Query(..., description="YYYY-MM-DD")):
+    return service.get_analysis_by_date(run_date)

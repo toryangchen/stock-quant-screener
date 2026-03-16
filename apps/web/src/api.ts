@@ -1,4 +1,4 @@
-import type { EtfResponse, ScreeningResponse } from "./types";
+import type { AnalysisResponse, EtfResponse, ScreeningResponse } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -34,4 +34,21 @@ export async function fetchEtf(date: string): Promise<EtfResponse> {
     throw new Error(`fetch etf failed: ${resp.status}`);
   }
   return (await resp.json()) as EtfResponse;
+}
+
+export async function fetchAnalysisDates(): Promise<string[]> {
+  const resp = await fetch(`${API_BASE}/api/analysis/dates`);
+  if (!resp.ok) {
+    throw new Error(`fetch analysis dates failed: ${resp.status}`);
+  }
+  const json = (await resp.json()) as { dates: string[] };
+  return json.dates ?? [];
+}
+
+export async function fetchAnalysis(date: string): Promise<AnalysisResponse> {
+  const resp = await fetch(`${API_BASE}/api/analysis?run_date=${date}`);
+  if (!resp.ok) {
+    throw new Error(`fetch analysis failed: ${resp.status}`);
+  }
+  return (await resp.json()) as AnalysisResponse;
 }

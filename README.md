@@ -76,6 +76,12 @@ cp .env.example .env
 - `_id`: `[code].[run_date]`
 - 顶层字段保留 `code`, `run_date`, `decision`, `rank` 等结果字段
 
+`analysis_stock`
+
+- 用途：盘中观察股票历史记录
+- `_id`: `[code].[run_date]`
+- 顶层字段保留 `code`, `run_date`, `name`, `entry_price`, `pct_chg`, `source_file`
+
 ## A 股日筛流程
 
 ### 1. 拉当日全量股票日线
@@ -181,6 +187,7 @@ cp .env.example .env
 .venv/bin/python -m scripts.main ingest-etf
 .venv/bin/python -m scripts.main etf-rotation
 .venv/bin/python -m scripts.main etf
+.venv/bin/python -m scripts.main import-analysis-stock --source-dir outputs/analyse-stock-by-date
 ```
 
 常用参数：
@@ -218,6 +225,11 @@ npm run dev
 ```bash
 VITE_API_BASE=http://127.0.0.1:8000 npm run dev
 ```
+
+新增接口：
+
+- `GET /api/analysis/dates`
+- `GET /api/analysis?run_date=2026-03-10`
 
 更多说明见 [apps/README.md](./apps/README.md)。
 

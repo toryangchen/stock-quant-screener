@@ -26,6 +26,7 @@ class MongoSettings:
     screening_collection: str
     market_collection: str
     etf_history_collection: str
+    analysis_stock_collection: str
 
 
 @lru_cache(maxsize=1)
@@ -37,4 +38,6 @@ def get_settings() -> MongoSettings:
         screening_collection=os.getenv("MONGO_HISTORY_COLLECTION", "screening_history").strip() or "screening_history",
         market_collection=os.getenv("MONGO_COLLECTION", "market_cache").strip() or "market_cache",
         etf_history_collection=os.getenv("MONGO_ETF_HISTORY_COLLECTION", "etf_history").strip() or "etf_history",
+        analysis_stock_collection=os.getenv("MONGO_ANALYSIS_STOCK_COLLECTION", "analysis_stock").strip()
+        or "analysis_stock",
     )

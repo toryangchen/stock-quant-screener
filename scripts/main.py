@@ -122,13 +122,28 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="A-share quant screener demo")
     parser.add_argument(
         "command",
-        choices=["etf", "etf-rotation", "ingest-etf", "breakout", "sync", "ingest", "ingest-daily", "ingest-mktcap"],
+        choices=[
+            "etf",
+            "etf-rotation",
+            "ingest-etf",
+            "breakout",
+            "sync",
+            "ingest",
+            "ingest-daily",
+            "ingest-mktcap",
+            "import-analysis-stock",
+        ],
     )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--scan-limit", type=int, default=None)
     parser.add_argument("--risk-per-trade", type=float, default=None)
     parser.add_argument("--sleep", type=float, default=None)
     parser.add_argument("--trade-date", default=None, help="YYYYMMDD, for ingest-mktcap")
+    parser.add_argument(
+        "--source-dir",
+        default="outputs/analyse-stock-by-date",
+        help="分析股票文本目录，默认 outputs/analyse-stock-by-date",
+    )
     return parser.parse_args()
 
 
@@ -347,6 +362,18 @@ def run_ingest_mktcap_module(logger: logging.Logger, trade_date: str | None = No
     )
 
 
+def run_import_analysis_stock_module(logger: logging.Logger, source_dir: str) -> None:
+    job = import_module("scripts.jobs.import_analysis_stock")
+    result = job.import_analysis_stock(source_dir=source_dir, logger=logger)
+    logger.info(
+        "分析股票导入完成: files=%s, parsed_rows=%s, mongo_upserts=%s, source_dir=%s",
+        result.files,
+        result.parsed_rows,
+        result.mongo_upserts,
+        source_dir,
+    )
+
+
 def build_mongo_breakout_ds(logger: logging.Logger):
     ds = import_module("scripts.data_source.mongo_only").MongoOnlyDataSource()
     logger.info("Breakout DataSource 使用 MongoOnly(market_cache)")
@@ -400,6 +427,13 @@ def main() -> int:
     if args.command == "ingest-mktcap":
         try:
             run_ingest_mktcap_module(logger, trade_date=args.trade_date)
+            return 0
+        except Exception as exc:
+            logger.error("执行失败: %s", exc)
+            return 3
+    if args.command == "import-analysis-stock":
+        try:
+            run_import_analysis_stock_module(logger, source_dir=args.source_dir)
             return 0
         except Exception as exc:
             logger.error("执行失败: %s", exc)
