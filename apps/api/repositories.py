@@ -15,7 +15,8 @@ class MongoReadRepository:
         self.etf_history_coll = db[self.settings.etf_history_collection]
 
     def get_screening_dates(self) -> list[str]:
-        dates = self.screening_coll.distinct("run_date", {"is_secondary": True})
+        # Show any trading date that produced screening docs, even if secondary picks are empty.
+        dates = self.screening_coll.distinct("run_date")
         return sorted(str(item) for item in dates if item)
 
     def get_etf_dates(self) -> list[str]:
