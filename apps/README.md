@@ -43,11 +43,13 @@ npm run dev
 VITE_API_BASE=http://127.0.0.1:8000 npm run dev
 ```
 
-GitHub Pages 发布：
+Cloudflare Pages 发布：
 
-1. 在仓库 Pages 设置中选择 `GitHub Actions`
-2. 在仓库 Pages 设置里配置自定义域名 `stock.toryang.cc`
-3. 推送 `main` 后，`deploy-web.yml` 会自动发布到 `https://stock.toryang.cc`
+1. 在 Cloudflare Pages 中连接这个 GitHub 仓库
+2. 根目录填写 `apps/web`
+3. 构建命令填写 `npm run build:cloudflare`
+4. 输出目录填写 `dist`
+5. 绑定自定义域名 `stock.toryang.cc`
 
 生产环境默认前端请求：
 

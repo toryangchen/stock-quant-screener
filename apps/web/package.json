@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:cloudflare": "VITE_BASE_PATH=/ VITE_API_BASE=https://api.toryang.cc/stock npm run build",
     "preview": "vite preview"
   },
   "dependencies": {

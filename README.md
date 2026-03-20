@@ -239,12 +239,14 @@ npm run dev
 VITE_API_BASE=http://127.0.0.1:8000 npm run dev
 ```
 
-生产环境改为 GitHub Pages 部署：
+生产环境改为 Cloudflare Pages 部署：
 
 1. 保留 API 的服务器部署流程，继续使用 `.github/workflows/deploy-api.yml`
-2. 在 GitHub 仓库开启 `Settings -> Pages -> Build and deployment -> Source = GitHub Actions`
-3. 在 GitHub 仓库 `Settings -> Pages` 里把自定义域名设置为 `stock.toryang.cc`
-4. 推送 `main` 分支后，`.github/workflows/deploy-web.yml` 会自动构建并发布到 GitHub Pages
+2. 在 Cloudflare Pages 里连接这个 GitHub 仓库
+3. 根目录设置为 `apps/web`
+4. 构建命令使用 `npm run build:cloudflare`
+5. 输出目录设置为 `dist`
+6. 在 Cloudflare Pages 里把自定义域名设置为 `stock.toryang.cc`
 
 说明：
 
