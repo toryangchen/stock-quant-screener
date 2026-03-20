@@ -14,31 +14,31 @@ def health():
     return service.health()
 
 
-@router.get("/api/screening/dates")
+@router.get("/screening/dates")
 def screening_dates():
     return service.get_screening_dates()
 
 
-@router.get("/api/screening")
+@router.get("/screening")
 def screening_by_date(run_date: str = Query(..., description="YYYY-MM-DD")):
     return service.get_screening_by_date(run_date)
 
 
-@router.get("/api/etf/dates")
+@router.get("/etf/dates")
 def etf_dates():
     return service.get_etf_dates()
 
 
-@router.get("/api/etf")
+@router.get("/etf")
 def etf_by_date(run_date: str = Query(..., description="YYYY-MM-DD")):
     return service.get_etf_by_date(run_date)
 
 
-@router.get("/api/analysis/dates")
+@router.get("/analysis/dates")
 def analysis_dates():
     return service.get_analysis_dates()
 
 
-@router.get("/api/analysis")
+@router.get("/analysis")
 def analysis_by_date(run_date: str = Query(..., description="YYYY-MM-DD")):
     return service.get_analysis_by_date(run_date)

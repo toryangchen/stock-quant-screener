@@ -27,6 +27,12 @@ class MongoSettings:
     market_collection: str
     etf_history_collection: str
     analysis_stock_collection: str
+    cors_origins: tuple[str, ...]
+
+
+def parse_csv_env(name: str, default: str = "") -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
 @lru_cache(maxsize=1)
@@ -40,4 +46,5 @@ def get_settings() -> MongoSettings:
         etf_history_collection=os.getenv("MONGO_ETF_HISTORY_COLLECTION", "etf_history").strip() or "etf_history",
         analysis_stock_collection=os.getenv("MONGO_ANALYSIS_STOCK_COLLECTION", "analysis_stock").strip()
         or "analysis_stock",
+        cors_origins=parse_csv_env("API_CORS_ORIGINS", "*"),
     )

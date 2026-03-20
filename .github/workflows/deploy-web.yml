@@ -9,9 +9,21 @@ on:
       - ".github/workflows/deploy-web.yml"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
 jobs:
   deploy-web:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     defaults:
       run:
@@ -28,37 +40,28 @@ jobs:
           cache: "npm"
           cache-dependency-path: apps/web/package-lock.json
 
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
       - name: Install dependencies
         run: npm ci
 
+      - name: Check web API base
+        shell: bash
+        run: |
+          test -f public/CNAME
+
       - name: Build web
         env:
-          VITE_BASE_PATH: /quant-screener/
-          VITE_API_BASE: /quant-screener
+          VITE_BASE_PATH: /
+          VITE_API_BASE: https://api.toryang.cc/stock
         run: npm run build
 
-      - name: Setup SSH key
-        shell: bash
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p "${{ secrets.DEPLOY_PORT }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/dist
 
-      - name: Upload dist to server
-        shell: bash
-        run: |
-          rsync -az --delete \
-            -e "ssh -i ~/.ssh/id_ed25519 -p ${{ secrets.DEPLOY_PORT }}" \
-            dist/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/quant-screener-dist/"
-
-      - name: Publish dist on server
-        shell: bash
-        run: |
-          ssh -i ~/.ssh/id_ed25519 -p "${{ secrets.DEPLOY_PORT }}" "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" <<'EOF'
-          set -e
-          sudo mkdir -p /var/www/quant-screener
-          sudo rsync -a --delete /tmp/quant-screener-dist/ /var/www/quant-screener/
-          sudo nginx -t
-          sudo systemctl reload nginx
-          EOF
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -3,7 +3,7 @@ import type { AnalysisResponse, EtfResponse, ScreeningResponse } from "./types";
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
 export async function fetchDates(): Promise<string[]> {
-  const resp = await fetch(`${API_BASE}/api/screening/dates`);
+  const resp = await fetch(`${API_BASE}/screening/dates`);
   if (!resp.ok) {
     throw new Error(`fetch dates failed: ${resp.status}`);
   }
@@ -12,7 +12,7 @@ export async function fetchDates(): Promise<string[]> {
 }
 
 export async function fetchScreening(date: string): Promise<ScreeningResponse> {
-  const resp = await fetch(`${API_BASE}/api/screening?run_date=${date}`);
+  const resp = await fetch(`${API_BASE}/screening?run_date=${date}`);
   if (!resp.ok) {
     throw new Error(`fetch screening failed: ${resp.status}`);
   }
@@ -20,7 +20,7 @@ export async function fetchScreening(date: string): Promise<ScreeningResponse> {
 }
 
 export async function fetchEtfDates(): Promise<string[]> {
-  const resp = await fetch(`${API_BASE}/api/etf/dates`);
+  const resp = await fetch(`${API_BASE}/etf/dates`);
   if (!resp.ok) {
     throw new Error(`fetch etf dates failed: ${resp.status}`);
   }
@@ -29,7 +29,7 @@ export async function fetchEtfDates(): Promise<string[]> {
 }
 
 export async function fetchEtf(date: string): Promise<EtfResponse> {
-  const resp = await fetch(`${API_BASE}/api/etf?run_date=${date}`);
+  const resp = await fetch(`${API_BASE}/etf?run_date=${date}`);
   if (!resp.ok) {
     throw new Error(`fetch etf failed: ${resp.status}`);
   }
@@ -37,7 +37,7 @@ export async function fetchEtf(date: string): Promise<EtfResponse> {
 }
 
 export async function fetchAnalysisDates(): Promise<string[]> {
-  const resp = await fetch(`${API_BASE}/api/analysis/dates`);
+  const resp = await fetch(`${API_BASE}/analysis/dates`);
   if (!resp.ok) {
     throw new Error(`fetch analysis dates failed: ${resp.status}`);
   }
@@ -46,7 +46,7 @@ export async function fetchAnalysisDates(): Promise<string[]> {
 }
 
 export async function fetchAnalysis(date: string): Promise<AnalysisResponse> {
-  const resp = await fetch(`${API_BASE}/api/analysis?run_date=${date}`);
+  const resp = await fetch(`${API_BASE}/analysis?run_date=${date}`);
   if (!resp.ok) {
     throw new Error(`fetch analysis failed: ${resp.status}`);
   }

@@ -199,7 +199,7 @@ cp .env.example .env
 
 ## Web 跟踪页面
 
-后端（mock）：
+后端（API，部署在你自己的服务器）：
 
 ```bash
 cd apps/api
@@ -207,6 +207,19 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+建议在服务器 `.env` 里配置跨域白名单：
+
+```bash
+API_CORS_ORIGINS=http://localhost:5173,https://stock.toryang.cc
+```
+
+生产环境域名约定：
+
+```text
+Web: https://stock.toryang.cc
+API: https://api.toryang.cc/stock
 ```
 
 前端：
@@ -226,10 +239,23 @@ npm run dev
 VITE_API_BASE=http://127.0.0.1:8000 npm run dev
 ```
 
+生产环境改为 GitHub Pages 部署：
+
+1. 保留 API 的服务器部署流程，继续使用 `.github/workflows/deploy-api.yml`
+2. 在 GitHub 仓库开启 `Settings -> Pages -> Build and deployment -> Source = GitHub Actions`
+3. 在 GitHub 仓库 `Settings -> Pages` 里把自定义域名设置为 `stock.toryang.cc`
+4. 推送 `main` 分支后，`.github/workflows/deploy-web.yml` 会自动构建并发布到 GitHub Pages
+
+说明：
+
+- 前端构建时固定使用根路径 `/`，适配自定义域名 `https://stock.toryang.cc`
+- API 地址已固定注入为 `https://api.toryang.cc/stock`
+- 你的反向代理需要把 `https://api.toryang.cc/stock/...` 转发到 FastAPI 实际服务
+
 新增接口：
 
-- `GET /api/analysis/dates`
-- `GET /api/analysis?run_date=2026-03-10`
+- `GET /analysis/dates`
+- `GET /analysis?run_date=2026-03-10`
 
 更多说明见 [apps/README.md](./apps/README.md)。
 
