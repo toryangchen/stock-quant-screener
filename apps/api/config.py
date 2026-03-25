@@ -28,11 +28,25 @@ class MongoSettings:
     etf_history_collection: str
     analysis_stock_collection: str
     cors_origins: tuple[str, ...]
+    response_cache_ttl_seconds: int
+    dates_cache_ttl_seconds: int
+    mongo_max_pool_size: int
+    mongo_min_pool_size: int
 
 
 def parse_csv_env(name: str, default: str = "") -> tuple[str, ...]:
     raw = os.getenv(name, default)
     return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def parse_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
 
 
 @lru_cache(maxsize=1)
@@ -47,4 +61,8 @@ def get_settings() -> MongoSettings:
         analysis_stock_collection=os.getenv("MONGO_ANALYSIS_STOCK_COLLECTION", "analysis_stock").strip()
         or "analysis_stock",
         cors_origins=parse_csv_env("API_CORS_ORIGINS", "*"),
+        response_cache_ttl_seconds=max(parse_int_env("API_RESPONSE_CACHE_TTL_SECONDS", 60), 0),
+        dates_cache_ttl_seconds=max(parse_int_env("API_DATES_CACHE_TTL_SECONDS", 300), 0),
+        mongo_max_pool_size=max(parse_int_env("MONGO_MAX_POOL_SIZE", 20), 1),
+        mongo_min_pool_size=max(parse_int_env("MONGO_MIN_POOL_SIZE", 1), 0),
     )

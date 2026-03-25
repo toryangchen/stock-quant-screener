@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from cache import TTLCache
 from config import get_settings
 from db import get_client
 from repositories import MongoReadRepository
@@ -13,6 +14,8 @@ from utils import build_points, to_float
 class QuantReadService:
     def __init__(self, repo: MongoReadRepository | None = None) -> None:
         self.repo = repo or MongoReadRepository()
+        self.settings = get_settings()
+        self.cache = TTLCache()
 
     def health(self) -> dict[str, Any]:
         try:
@@ -22,15 +25,35 @@ class QuantReadService:
         return {"ok": True, "db": get_settings().db_name}
 
     def get_screening_dates(self) -> dict[str, list[str]]:
-        return {"dates": self.repo.get_screening_dates()}
+        cache_key = "dates:screening"
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = {"dates": self.repo.get_screening_dates()}
+        return self.cache.set(cache_key, result, self.settings.dates_cache_ttl_seconds)
 
     def get_etf_dates(self) -> dict[str, list[str]]:
-        return {"dates": self.repo.get_etf_dates()}
+        cache_key = "dates:etf"
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = {"dates": self.repo.get_etf_dates()}
+        return self.cache.set(cache_key, result, self.settings.dates_cache_ttl_seconds)
 
     def get_analysis_dates(self) -> dict[str, list[str]]:
-        return {"dates": self.repo.get_analysis_dates()}
+        cache_key = "dates:analysis"
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = {"dates": self.repo.get_analysis_dates()}
+        return self.cache.set(cache_key, result, self.settings.dates_cache_ttl_seconds)
 
     def get_screening_by_date(self, run_date: str) -> dict[str, Any]:
+        cache_key = f"screening:{run_date}"
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         docs = self.repo.get_screening_docs(run_date)
         if not docs:
             raise HTTPException(status_code=404, detail=f"date not found: {run_date}")
@@ -65,7 +88,7 @@ class QuantReadService:
                 secondary_stocks.append(pick)
 
         today = max(latest_dates) if latest_dates else run_date
-        return {
+        result = {
             "date": run_date,
             "today": today,
             "stocks": secondary_stocks,
@@ -73,8 +96,14 @@ class QuantReadService:
             "secondary_stocks": secondary_stocks,
             "trends": trends,
         }
+        return self.cache.set(cache_key, result, self.settings.response_cache_ttl_seconds)
 
     def get_etf_by_date(self, run_date: str) -> dict[str, Any]:
+        cache_key = f"etf:{run_date}"
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         docs = self.repo.get_etf_docs(run_date)
         if not docs:
             raise HTTPException(status_code=404, detail=f"etf date not found: {run_date}")
@@ -99,9 +128,15 @@ class QuantReadService:
                 }
             )
 
-        return {"date": run_date, "decision": decision, "etfs": etfs}
+        result = {"date": run_date, "decision": decision, "etfs": etfs}
+        return self.cache.set(cache_key, result, self.settings.response_cache_ttl_seconds)
 
     def get_analysis_by_date(self, run_date: str) -> dict[str, Any]:
+        cache_key = f"analysis:{run_date}"
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         docs = self.repo.get_analysis_docs(run_date)
         if not docs:
             raise HTTPException(status_code=404, detail=f"analysis date not found: {run_date}")
@@ -147,7 +182,8 @@ class QuantReadService:
             trends.append({"code": code, "name": name, "points": points})
 
         today = max(latest_dates) if latest_dates else run_date
-        return {"date": run_date, "today": today, "stocks": stocks, "trends": trends}
+        result = {"date": run_date, "today": today, "stocks": stocks, "trends": trends}
+        return self.cache.set(cache_key, result, self.settings.response_cache_ttl_seconds)
 
     def _build_stock_pick(self, doc: dict[str, Any], market_doc: dict[str, Any]) -> dict[str, Any]:
         entry_price = to_float(doc.get("entry_price"))
