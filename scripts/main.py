@@ -132,13 +132,14 @@ def parse_args() -> argparse.Namespace:
             "ingest-daily",
             "ingest-mktcap",
             "import-analysis-stock",
+            "import-daily-stock-selections",
         ],
     )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--scan-limit", type=int, default=None)
     parser.add_argument("--risk-per-trade", type=float, default=None)
     parser.add_argument("--sleep", type=float, default=None)
-    parser.add_argument("--trade-date", default=None, help="YYYYMMDD, for ingest-mktcap")
+    parser.add_argument("--trade-date", default=None, help="YYYYMMDD/ YYYY-MM-DD, for ingest-mktcap or imports")
     parser.add_argument(
         "--source-dir",
         default="outputs/analyse-stock-by-date",
@@ -374,6 +375,19 @@ def run_import_analysis_stock_module(logger: logging.Logger, source_dir: str) ->
     )
 
 
+def run_import_daily_stock_selections_module(logger: logging.Logger, trade_date: str | None = None) -> None:
+    job = import_module("scripts.jobs.import_daily_stock_selections")
+    result = job.import_daily_stock_selections(logger=logger, run_date=trade_date)
+    logger.info(
+        "每日推送股票导入完成: run_date=%s, source_id=%s, source_count=%s, parsed_rows=%s, mongo_upserts=%s",
+        result.run_date,
+        result.source_id,
+        result.source_count,
+        result.parsed_rows,
+        result.mongo_upserts,
+    )
+
+
 def build_mongo_breakout_ds(logger: logging.Logger):
     ds = import_module("scripts.data_source.mongo_only").MongoOnlyDataSource()
     logger.info("Breakout DataSource 使用 MongoOnly(market_cache)")
@@ -434,6 +448,13 @@ def main() -> int:
     if args.command == "import-analysis-stock":
         try:
             run_import_analysis_stock_module(logger, source_dir=args.source_dir)
+            return 0
+        except Exception as exc:
+            logger.error("执行失败: %s", exc)
+            return 3
+    if args.command == "import-daily-stock-selections":
+        try:
+            run_import_daily_stock_selections_module(logger, trade_date=args.trade_date)
             return 0
         except Exception as exc:
             logger.error("执行失败: %s", exc)
