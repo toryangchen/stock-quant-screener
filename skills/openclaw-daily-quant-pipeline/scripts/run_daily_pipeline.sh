@@ -113,7 +113,7 @@ echo "[4/4] mongo post-check"
 if [[ -n "${MONGO_URI:-}" ]]; then
   mongosh --quiet "$MONGO_URI" --eval '
 const dbx = db.getSiblingDB("quant_screener");
-const nonStock = dbx.market_cache.countDocuments({_id: {$not: /^\\d{6}$/}});
+const nonStock = dbx.market_cache.countDocuments({_id: {$not: /^\d{6}$/}});
 if (nonStock > 0) {
   printjson({ok: 0, non_stock_docs: nonStock});
   quit(2);
@@ -125,7 +125,7 @@ printjson({ok: 1, non_stock_docs: nonStock, screening_today: screening});
 else
   mongosh --quiet --eval '
 const dbx = db.getSiblingDB("quant_screener");
-const nonStock = dbx.market_cache.countDocuments({_id: {$not: /^\\d{6}$/}});
+const nonStock = dbx.market_cache.countDocuments({_id: {$not: /^\d{6}$/}});
 if (nonStock > 0) {
   printjson({ok: 0, non_stock_docs: nonStock});
   quit(2);
